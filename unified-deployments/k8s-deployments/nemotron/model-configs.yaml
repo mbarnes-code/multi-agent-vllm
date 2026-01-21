@@ -1,0 +1,74 @@
+# Model Configuration Presets for vLLM Distributed Deployment
+# Each model defines vLLM serve parameters optimized for the DGX Spark cluster
+
+# Available models (use --model flag in deploy-distributed.sh)
+# Use the 'name' field to specify which model to deploy
+
+models:
+  # Microsoft Phi-4 - State-of-the-art 14B model with strong reasoning
+  # https://huggingface.co/microsoft/phi-4
+  # Note: Model uses 27GB, fits on single GB10 GPU (128GB)
+  phi-4:
+    name: "phi-4"
+    display_name: "Phi-4 (14B)"
+    huggingface_id: "microsoft/phi-4"
+    description: "Microsoft's state-of-the-art 14B model - strong math, code, and reasoning"
+    requires_trust_remote_code: true
+    size_gb: 28
+    vllm_args:
+      dtype: "bfloat16"
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 4096
+      gpu_memory_utilization: 0.85
+      enforce_eager: true
+      disable_frontend_multiprocessing: true  # Avoid V1 multiprocess engine issue
+    env_vars:
+      VLLM_USE_V1: "0"
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+    distributed: false
+    min_gpus: 1
+
+  # NVIDIA Nemotron-3 Nano 30B - Default model
+  nemotron-nano-30b:
+    name: "nemotron-nano-30b"
+    display_name: "Nemotron-3 Nano 30B"
+    huggingface_id: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+    description: "NVIDIA's efficient reasoning model with 30B total / 3.6B active params"
+    requires_trust_remote_code: true
+    size_gb: 60
+    # vLLM serve parameters
+    vllm_args:
+      dtype: "bfloat16"
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 2
+      max_model_len: 4096
+      gpu_memory_utilization: 0.85
+      enforce_eager: true
+    # Additional environment variables
+    env_vars: {}
+    # Recommended for distributed mode
+    distributed: true
+    min_gpus: 2
+
+  # Mistral Nemo 12B - Efficient smaller model
+  mistral-nemo-12b:
+    name: "mistral-nemo-12b"
+    display_name: "Mistral-Nemo-Instruct-2407"
+    huggingface_id: "mistralai/Mistral-Nemo-Instruct-2407"
+    description: "Mistral's efficient 12B Nemo model"
+    requires_trust_remote_code: false
+    size_gb: 24
+    vllm_args:
+      dtype: "bfloat16"
+      tensor_parallel_size: 1
+      pipeline_parallel_size: 1
+      max_model_len: 16384
+      gpu_memory_utilization: 0.80
+      enforce_eager: false  # Can use CUDA graphs for smaller model
+    env_vars: {}
+    distributed: false
+    min_gpus: 1
+
+# Default model to use when none specified
+default_model: "nemotron-nano-30b"
