@@ -1,530 +1,881 @@
 """
-Coding Agent - Autonomous code generation and development tasks.
+Coding Agent for the multi-agent system.
 
-Based on patterns from claude-quickstarts/autonomous-coding, adapted for VLLM.
-Handles code generation, debugging, code review, and software development.
+Specialized agent for code generation, debugging, testing, and code review.
+Based on patterns from:
+- claude-quickstarts/autonomous-coding
+- claude-quickstarts/agents
+- claude-plugins-official/plugins/code-review
+- claude-plugins-official/plugins/feature-dev
+- claude-cookbooks/tool_use
 """
 
-import os
-import subprocess
-import tempfile
 from pathlib import Path
-from typing import Optional, Dict, Any, List
-from ..core import Agent, Result
+from typing import Any, Callable, Dict, List, Optional
 
-CODING_INSTRUCTIONS = """You are an expert Coding Agent specialized in software development.
-
-## YOUR CAPABILITIES
-
-1. **Code Generation**: Write clean, efficient, well-documented code in any language
-2. **Code Review**: Analyze code for bugs, security issues, and improvements
-3. **Debugging**: Identify and fix issues in existing code
-4. **Refactoring**: Improve code structure and maintainability
-5. **Testing**: Write unit tests and integration tests
-6. **Documentation**: Generate docstrings, comments, and technical docs
-
-## CODING PRINCIPLES
-
-- Write clean, readable code following language-specific best practices
-- Include appropriate error handling and edge case coverage
-- Add meaningful comments for complex logic
-- Follow SOLID principles and design patterns where appropriate
-- Consider performance implications
-- Write testable code with clear interfaces
-
-## AVAILABLE TOOLS
-
-- `execute_code`: Run code in a sandboxed environment
-- `analyze_code`: Static analysis for bugs and style issues
-- `search_code_patterns`: Find code examples and patterns
-- `generate_tests`: Create unit tests for given code
-- `explain_code`: Provide detailed explanation of code
-
-## WORKFLOW
-
-1. **Understand**: Clarify requirements before coding
-2. **Plan**: Outline the approach and structure
-3. **Implement**: Write the code incrementally
-4. **Test**: Verify the code works correctly
-5. **Refine**: Improve based on feedback
-
-## SECURITY
-
-- Never execute untrusted code without sandboxing
-- Sanitize all inputs
-- Avoid hardcoded credentials
-- Follow secure coding practices
-
-When generating code:
-- Ask clarifying questions if requirements are ambiguous
-- Provide complete, runnable solutions
-- Include usage examples
-- Explain key design decisions"""
+from ..core import Agent
 
 
-class CodingAgent:
-    """Factory for creating coding agents with development tools."""
+def create_coding_agent(
+    model: str,
+    enable_execution: bool = True,
+    enable_bash: bool = True,
+    workspace_dir: str = "/tmp/workspace",
+    memory_dir: str = "/tmp/memory",
+) -> Agent:
+    """
+    Create a coding agent with comprehensive code tools.
     
-    def __init__(
-        self,
-        model: str = "meta-llama/Llama-3.1-8B-Instruct",
-        workspace_dir: Optional[str] = None,
-        allowed_languages: Optional[List[str]] = None,
-        enable_execution: bool = True,
-        execution_timeout: int = 30,
-    ):
-        self.model = model
-        self.workspace_dir = workspace_dir or tempfile.mkdtemp(prefix="coding_agent_")
-        self.allowed_languages = allowed_languages or [
-            "python", "javascript", "typescript", "go", "rust", "java", "c", "cpp", "bash"
-        ]
-        self.enable_execution = enable_execution
-        self.execution_timeout = execution_timeout
+    Args:
+        model: The model to use for the agent
+        enable_execution: Whether to enable code execution (default: True)
+        enable_bash: Whether to enable bash commands (default: True)
+        workspace_dir: Directory for file operations (default: /tmp/workspace)
+        memory_dir: Directory for memory storage (default: /tmp/memory)
         
-        # Ensure workspace exists
-        Path(self.workspace_dir).mkdir(parents=True, exist_ok=True)
+    Returns:
+        Configured Agent for coding tasks
+    """
+    # Create workspace directory
+    workspace = Path(workspace_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+    
+    # Build functions list
+    functions: List[Callable] = []
+    
+    # File tools
+    functions.append(_create_file_read(workspace_dir))
+    functions.append(_create_file_write(workspace_dir))
+    functions.append(_create_glob(workspace_dir))
+    functions.append(_create_grep(workspace_dir))
+    
+    # Code execution tools
+    if enable_execution:
+        functions.append(_create_execute_code(workspace_dir))
+        functions.append(_create_python_repl())
+    
+    # Bash tool
+    if enable_bash:
+        functions.append(_create_bash(workspace_dir))
+    
+    # Memory tool
+    functions.append(_create_memory(memory_dir))
+    
+    # Code analysis functions
+    functions.extend([
+        analyze_code,
+        search_code_patterns,
+        generate_tests,
+        explain_code,
+        suggest_improvements,
+    ])
+    
+    return Agent(
+        name="Coding Agent",
+        model=model,
+        instructions=CODING_INSTRUCTIONS,
+        functions=functions,
+    )
+
+
+# Tool factory functions
+
+def _create_file_read(workspace_dir: str) -> Callable:
+    """Create file read function bound to workspace."""
+    import asyncio
+    
+    def file_read(path: str, max_lines: int = 0, start_line: int = 1) -> str:
+        """
+        Read file contents or list directory.
         
-    def _create_coding_functions(self) -> list:
-        """Create coding tool functions."""
+        Args:
+            path: File or directory path
+            max_lines: Maximum lines to read (0 = no limit)
+            start_line: Line number to start from (1-indexed)
+        """
+        file_path = Path(workspace_dir) / path
         
-        def execute_code(code: str, language: str = "python") -> str:
-            """
-            Execute code in a sandboxed environment.
+        if not file_path.exists():
+            return f"Error: Path not found: {path}"
+        
+        if file_path.is_dir():
+            items = []
+            for item in sorted(file_path.iterdir()):
+                if item.name.startswith("."):
+                    continue
+                prefix = "📁 " if item.is_dir() else "📄 "
+                items.append(f"{prefix}{item.name}")
+            return f"Contents of {path}:\n" + "\n".join(items) if items else f"Directory {path} is empty"
+        
+        try:
+            with open(file_path, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
             
-            Args:
-                code: The code to execute
-                language: Programming language (python, javascript, bash, etc.)
-            """
-            if not self.enable_execution:
-                return "Code execution is disabled for security reasons."
+            start_idx = max(0, start_line - 1)
+            if max_lines > 0:
+                lines = lines[start_idx:start_idx + max_lines]
+            else:
+                lines = lines[start_idx:]
             
-            language = language.lower()
-            if language not in self.allowed_languages:
-                return f"Language '{language}' is not allowed. Supported: {', '.join(self.allowed_languages)}"
+            numbered = [f"{i + start_idx + 1:4d}: {line.rstrip()}" for i, line in enumerate(lines)]
+            return "\n".join(numbered)
+        except Exception as e:
+            return f"Error reading {path}: {e}"
+    
+    return file_read
+
+
+def _create_file_write(workspace_dir: str) -> Callable:
+    """Create file write function bound to workspace."""
+    
+    def file_write(
+        operation: str,
+        path: str,
+        content: str = "",
+        old_text: str = "",
+        new_text: str = "",
+    ) -> str:
+        """
+        Write or edit files.
+        
+        Args:
+            operation: Operation to perform (write, edit, append)
+            path: File path
+            content: Content for write/append
+            old_text: Text to replace (for edit)
+            new_text: Replacement text (for edit)
+        """
+        file_path = Path(workspace_dir) / path
+        
+        # Security check
+        if ".." in path:
+            return "Error: Path traversal not allowed"
+        
+        try:
+            if operation == "write":
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(content, encoding="utf-8")
+                return f"Successfully wrote {len(content)} characters to {path}"
             
-            # Map languages to executors
-            executors = {
-                "python": ["python3", "-c"],
-                "javascript": ["node", "-e"],
-                "typescript": ["npx", "ts-node", "-e"],
-                "bash": ["bash", "-c"],
-                "go": None,  # Requires file-based execution
-                "rust": None,
-                "java": None,
-                "c": None,
-                "cpp": None,
-            }
+            elif operation == "edit":
+                if not file_path.exists():
+                    return f"Error: File not found: {path}"
+                current = file_path.read_text(encoding="utf-8")
+                if old_text not in current:
+                    return f"Error: Text not found in {path}"
+                new_content = current.replace(old_text, new_text, 1)
+                file_path.write_text(new_content, encoding="utf-8")
+                return f"Successfully edited {path}"
             
-            executor = executors.get(language)
+            elif operation == "append":
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(file_path, "a", encoding="utf-8") as f:
+                    f.write(content)
+                return f"Successfully appended to {path}"
             
-            if executor is None:
-                # File-based execution for compiled languages
-                return _execute_compiled(code, language, self.workspace_dir, self.execution_timeout)
-            
+            else:
+                return f"Error: Unknown operation '{operation}'"
+        except Exception as e:
+            return f"Error: {e}"
+    
+    return file_write
+
+
+def _create_glob(workspace_dir: str) -> Callable:
+    """Create glob function bound to workspace."""
+    import glob as glob_module
+    
+    def glob(pattern: str, max_results: int = 100) -> str:
+        """
+        Find files matching a glob pattern.
+        
+        Args:
+            pattern: Glob pattern (e.g., "*.py", "**/*.js")
+            max_results: Maximum results to return
+        """
+        search_path = Path(workspace_dir) / pattern
+        matches = list(glob_module.glob(str(search_path), recursive=True))
+        
+        if not matches:
+            return f"No files found matching: {pattern}"
+        
+        results = []
+        for match in sorted(matches)[:max_results]:
+            path = Path(match)
             try:
-                result = subprocess.run(
-                    executor + [code],
-                    capture_output=True,
-                    text=True,
-                    timeout=self.execution_timeout,
-                    cwd=self.workspace_dir,
-                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-                )
-                
-                output = ""
-                if result.stdout:
-                    output += f"STDOUT:\n{result.stdout}\n"
-                if result.stderr:
-                    output += f"STDERR:\n{result.stderr}\n"
-                output += f"Exit code: {result.returncode}"
-                
-                return output or "Code executed successfully with no output."
-                
-            except subprocess.TimeoutExpired:
-                return f"Execution timed out after {self.execution_timeout} seconds."
-            except Exception as e:
-                return f"Execution error: {str(e)}"
+                rel = path.relative_to(workspace_dir)
+            except ValueError:
+                rel = path
+            prefix = "📁 " if path.is_dir() else "📄 "
+            results.append(f"{prefix}{rel}")
         
-        def analyze_code(code: str, language: str = "python") -> str:
-            """
-            Perform static analysis on code.
-            
-            Args:
-                code: The code to analyze
-                language: Programming language
-            """
-            issues = []
-            
-            # Basic analysis (in production, use proper linters)
-            lines = code.split("\n")
-            
-            for i, line in enumerate(lines, 1):
-                # Check for common issues
-                if "eval(" in line or "exec(" in line:
-                    issues.append(f"Line {i}: Security risk - eval/exec usage")
-                if "password" in line.lower() and "=" in line:
-                    issues.append(f"Line {i}: Potential hardcoded password")
-                if len(line) > 120:
-                    issues.append(f"Line {i}: Line too long ({len(line)} chars)")
-                if line.rstrip() != line:
-                    issues.append(f"Line {i}: Trailing whitespace")
-                    
-            # Language-specific checks
-            if language == "python":
-                if "import *" in code:
-                    issues.append("Style: Avoid 'import *' - use explicit imports")
-                if "except:" in code and "except Exception" not in code:
-                    issues.append("Style: Avoid bare 'except:' - catch specific exceptions")
-                    
-            if not issues:
-                return "No issues found. Code looks good!"
-            
-            return "Issues found:\n" + "\n".join(f"- {issue}" for issue in issues)
-        
-        def search_code_patterns(query: str, language: str = "python") -> str:
-            """
-            Search for code patterns and examples.
-            
-            Args:
-                query: What pattern or example to search for
-                language: Programming language
-            """
-            # Common patterns database (simplified)
-            patterns = {
-                "python": {
-                    "singleton": '''class Singleton:
-    _instance = None
+        output = "\n".join(results)
+        if len(matches) > max_results:
+            output += f"\n\n(Showing first {max_results} of {len(matches)} results)"
+        return output
     
+    return glob
+
+
+def _create_grep(workspace_dir: str) -> Callable:
+    """Create grep function bound to workspace."""
+    import re
+    import glob as glob_module
+    
+    def grep(
+        pattern: str,
+        path: str = ".",
+        file_pattern: str = "**/*",
+        context_lines: int = 2,
+        max_results: int = 50,
+    ) -> str:
+        """
+        Search for text patterns in files.
+        
+        Args:
+            pattern: Regex pattern to search for
+            path: Directory to search
+            file_pattern: Glob pattern for files
+            context_lines: Lines of context around matches
+            max_results: Maximum matches to return
+        """
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            return f"Error: Invalid regex: {e}"
+        
+        search_dir = Path(workspace_dir) / path
+        files = list(glob_module.glob(str(search_dir / file_pattern), recursive=True))
+        files = [Path(f) for f in files if Path(f).is_file()]
+        
+        results = []
+        total = 0
+        
+        for file_path in files:
+            if total >= max_results:
+                break
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+                lines = content.splitlines()
+                
+                for i, line in enumerate(lines):
+                    if total >= max_results:
+                        break
+                    if regex.search(line):
+                        total += 1
+                        start = max(0, i - context_lines)
+                        end = min(len(lines), i + context_lines + 1)
+                        
+                        try:
+                            rel = file_path.relative_to(workspace_dir)
+                        except ValueError:
+                            rel = file_path
+                        
+                        result = f"\n{rel}:{i + 1}:\n"
+                        for j in range(start, end):
+                            prefix = ">>> " if j == i else "    "
+                            result += f"{prefix}{j + 1}: {lines[j]}\n"
+                        results.append(result)
+            except Exception:
+                continue
+        
+        if not results:
+            return f"No matches found for: {pattern}"
+        
+        output = f"Found {total} matches:\n" + "\n".join(results)
+        if total >= max_results:
+            output += f"\n\n(Showing first {max_results} matches)"
+        return output
+    
+    return grep
+
+
+def _create_execute_code(workspace_dir: str) -> Callable:
+    """Create code execution function."""
+    import subprocess
+    import tempfile
+    import os
+    import sys
+    
+    LANG_CONFIG = {
+        "python": {"ext": ".py", "cmd": [sys.executable]},
+        "javascript": {"ext": ".js", "cmd": ["node"]},
+        "typescript": {"ext": ".ts", "cmd": ["npx", "ts-node"]},
+        "bash": {"ext": ".sh", "cmd": ["bash"]},
+        "go": {"ext": ".go", "cmd": ["go", "run"]},
+    }
+    
+    def execute_code(code: str, language: str, timeout: int = 30) -> str:
+        """
+        Execute code in a sandboxed environment.
+        
+        Args:
+            code: The code to execute
+            language: Programming language (python, javascript, typescript, bash, go)
+            timeout: Execution timeout in seconds
+        """
+        language = language.lower()
+        if language not in LANG_CONFIG:
+            return f"Error: Unsupported language '{language}'. Supported: {list(LANG_CONFIG.keys())}"
+        
+        config = LANG_CONFIG[language]
+        
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=config["ext"],
+            delete=False,
+            dir=workspace_dir,
+        ) as f:
+            f.write(code)
+            temp_file = f.name
+        
+        try:
+            cmd = config["cmd"] + [temp_file]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=workspace_dir,
+            )
+            
+            output = []
+            if result.stdout:
+                output.append(f"Output:\n{result.stdout}")
+            if result.stderr:
+                output.append(f"Stderr:\n{result.stderr}")
+            output.append(f"Exit code: {result.returncode}")
+            
+            return "\n".join(output) if output else "Executed successfully (no output)"
+            
+        except subprocess.TimeoutExpired:
+            return f"Error: Execution timed out after {timeout} seconds"
+        except Exception as e:
+            return f"Error: {e}"
+        finally:
+            try:
+                os.unlink(temp_file)
+            except:
+                pass
+    
+    return execute_code
+
+
+def _create_python_repl() -> Callable:
+    """Create Python REPL function with persistent state."""
+    _globals: Dict[str, Any] = {}
+    _locals: Dict[str, Any] = {}
+    
+    def python_repl(code: str, reset: bool = False) -> str:
+        """
+        Execute Python code in an interactive REPL with persistent state.
+        
+        Args:
+            code: Python code to execute
+            reset: Reset the REPL state before execution
+        """
+        nonlocal _globals, _locals
+        
+        if reset:
+            _globals = {}
+            _locals = {}
+        
+        import io
+        import sys
+        from contextlib import redirect_stdout, redirect_stderr
+        
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+        
+        try:
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                try:
+                    result = eval(code, _globals, _locals)
+                    if result is not None:
+                        print(repr(result))
+                except SyntaxError:
+                    exec(code, _globals, _locals)
+            
+            stdout = stdout_capture.getvalue()
+            stderr = stderr_capture.getvalue()
+            
+            output = []
+            if stdout:
+                output.append(stdout.rstrip())
+            if stderr:
+                output.append(f"stderr: {stderr.rstrip()}")
+            
+            return "\n".join(output) if output else "(no output)"
+            
+        except Exception as e:
+            return f"Error: {type(e).__name__}: {e}"
+    
+    return python_repl
+
+
+def _create_bash(workspace_dir: str) -> Callable:
+    """Create bash execution function with security validation."""
+    import subprocess
+    import shlex
+    
+    ALLOWED_COMMANDS = {
+        "ls", "cat", "head", "tail", "wc", "grep", "find", "file",
+        "cp", "mv", "mkdir", "touch", "rm",
+        "pwd", "echo", "printf", "date",
+        "python", "python3", "pip", "pip3",
+        "node", "npm", "npx",
+        "git",
+        "curl", "wget",
+    }
+    
+    def bash(command: str, timeout: int = 30) -> str:
+        """
+        Execute bash commands with security validation.
+        
+        Args:
+            command: The bash command to execute
+            timeout: Command timeout in seconds
+        """
+        # Extract first command
+        try:
+            tokens = shlex.split(command)
+            if not tokens:
+                return "Error: Empty command"
+            
+            import os
+            cmd_name = os.path.basename(tokens[0])
+            
+            if cmd_name not in ALLOWED_COMMANDS:
+                return f"Error: Command '{cmd_name}' not allowed. Allowed: {sorted(ALLOWED_COMMANDS)}"
+        except ValueError as e:
+            return f"Error: Could not parse command: {e}"
+        
+        # Block dangerous patterns
+        dangerous = ["rm -rf /", "rm -rf ~", "> /dev/", "| sh", "| bash"]
+        for pattern in dangerous:
+            if pattern in command:
+                return f"Error: Dangerous pattern detected: {pattern}"
+        
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=workspace_dir,
+            )
+            
+            output = []
+            if result.stdout:
+                output.append(result.stdout.rstrip())
+            if result.stderr:
+                output.append(f"stderr: {result.stderr.rstrip()}")
+            if result.returncode != 0:
+                output.append(f"(exit code: {result.returncode})")
+            
+            return "\n".join(output) if output else "(no output)"
+            
+        except subprocess.TimeoutExpired:
+            return f"Error: Command timed out after {timeout} seconds"
+        except Exception as e:
+            return f"Error: {e}"
+    
+    return bash
+
+
+def _create_memory(memory_dir: str) -> Callable:
+    """Create memory tool function."""
+    import shutil
+    
+    memory_root = Path(memory_dir) / "memories"
+    memory_root.mkdir(parents=True, exist_ok=True)
+    
+    def memory(
+        command: str,
+        path: str = "",
+        content: str = "",
+        old_str: str = "",
+        new_str: str = "",
+    ) -> str:
+        """
+        Manage persistent memory storage.
+        
+        Args:
+            command: Operation (view, create, edit, delete)
+            path: Path within /memories
+            content: Content for create
+            old_str: Text to replace (for edit)
+            new_str: Replacement text (for edit)
+        """
+        if not path.startswith("/memories"):
+            path = "/memories" + ("/" + path if path else "")
+        
+        rel_path = path[len("/memories"):].lstrip("/")
+        full_path = memory_root / rel_path if rel_path else memory_root
+        
+        try:
+            if command == "view":
+                if full_path.is_dir():
+                    items = [f"- {i.name}{'/' if i.is_dir() else ''}" 
+                             for i in sorted(full_path.iterdir()) if not i.name.startswith(".")]
+                    return f"Directory: {path}\n" + "\n".join(items) if items else f"Directory {path} is empty"
+                elif full_path.is_file():
+                    lines = full_path.read_text().splitlines()
+                    return "\n".join(f"{i+1:4d}: {line}" for i, line in enumerate(lines))
+                else:
+                    return f"Error: Path not found: {path}"
+            
+            elif command == "create":
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                full_path.write_text(content)
+                return f"Created: {path}"
+            
+            elif command == "edit":
+                if not full_path.is_file():
+                    return f"Error: File not found: {path}"
+                current = full_path.read_text()
+                if old_str not in current:
+                    return f"Error: Text not found in {path}"
+                full_path.write_text(current.replace(old_str, new_str, 1))
+                return f"Edited: {path}"
+            
+            elif command == "delete":
+                if not full_path.exists():
+                    return f"Error: Path not found: {path}"
+                if full_path.is_file():
+                    full_path.unlink()
+                else:
+                    shutil.rmtree(full_path)
+                return f"Deleted: {path}"
+            
+            else:
+                return f"Error: Unknown command '{command}'"
+                
+        except Exception as e:
+            return f"Error: {e}"
+    
+    return memory
+
+
+# Code analysis functions
+
+def analyze_code(code: str, language: str) -> Dict[str, Any]:
+    """
+    Perform static analysis on code to find potential issues.
+    
+    Args:
+        code: The code to analyze
+        language: Programming language (python, javascript, typescript, go, rust)
+    """
+    issues = []
+    
+    if language == "python":
+        if "import *" in code:
+            issues.append({"severity": "warning", "message": "Avoid 'import *'"})
+        if "except:" in code and "except Exception" not in code:
+            issues.append({"severity": "warning", "message": "Bare 'except:' - catch specific exceptions"})
+        if "eval(" in code or "exec(" in code:
+            issues.append({"severity": "error", "message": "eval/exec is a security risk"})
+        if "password" in code.lower() and "=" in code:
+            issues.append({"severity": "error", "message": "Possible hardcoded password"})
+    
+    elif language in ("javascript", "typescript"):
+        if "var " in code:
+            issues.append({"severity": "warning", "message": "Use const/let instead of var"})
+        if "eval(" in code:
+            issues.append({"severity": "error", "message": "eval is a security risk"})
+        if "innerHTML" in code:
+            issues.append({"severity": "warning", "message": "innerHTML can be XSS risk"})
+    
+    elif language == "go":
+        if "panic(" in code:
+            issues.append({"severity": "warning", "message": "Avoid panic - return errors"})
+    
+    elif language == "rust":
+        if ".unwrap()" in code:
+            issues.append({"severity": "warning", "message": "unwrap() can panic - use ? or match"})
+    
+    return {
+        "language": language,
+        "issues": issues,
+        "issue_count": len(issues),
+        "has_errors": any(i["severity"] == "error" for i in issues),
+    }
+
+
+def search_code_patterns(query: str, language: str) -> Dict[str, Any]:
+    """
+    Search for common code patterns and provide examples.
+    
+    Args:
+        query: Pattern to search for (e.g., "singleton", "decorator", "async")
+        language: Programming language
+    """
+    patterns = {
+        "python": {
+            "singleton": '''class Singleton:
+    _instance = None
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance''',
-                    "context manager": '''from contextlib import contextmanager
-
-@contextmanager
-def managed_resource():
-    resource = acquire_resource()
-    try:
-        yield resource
-    finally:
-        release_resource(resource)''',
-                    "async http": '''import aiohttp
-import asyncio
-
-async def fetch(url):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            return await response.text()''',
-                    "decorator": '''from functools import wraps
-
+            "decorator": '''from functools import wraps
 def my_decorator(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # Before
+        # before
         result = func(*args, **kwargs)
-        # After
+        # after
         return result
     return wrapper''',
-                },
-                "javascript": {
-                    "async await": '''async function fetchData(url) {
-    try {
-        const response = await fetch(url);
-        const data = await response.json();
-        return data;
-    } catch (error) {
-        console.error('Error:', error);
-        throw error;
-    }
-}''',
-                    "class": '''class MyClass {
-    constructor(name) {
-        this.name = name;
-    }
-    
-    greet() {
-        return `Hello, ${this.name}!`;
-    }
-}''',
-                },
-            }
-            
-            lang_patterns = patterns.get(language, {})
-            query_lower = query.lower()
-            
-            matches = []
-            for pattern_name, pattern_code in lang_patterns.items():
-                if query_lower in pattern_name.lower():
-                    matches.append(f"### {pattern_name.title()}\n```{language}\n{pattern_code}\n```")
-            
-            if matches:
-                return "\n\n".join(matches)
-            return f"No patterns found for '{query}' in {language}. Try: {', '.join(lang_patterns.keys())}"
-        
-        def generate_tests(code: str, language: str = "python") -> str:
-            """
-            Generate unit tests for the given code.
-            
-            Args:
-                code: The code to generate tests for
-                language: Programming language
-            """
-            # Extract function/class names (simplified)
-            if language == "python":
-                import re
-                functions = re.findall(r'def (\w+)\(', code)
-                classes = re.findall(r'class (\w+)', code)
-                
-                tests = ["import pytest", ""]
-                
-                for func in functions:
-                    if not func.startswith("_"):
-                        tests.append(f'''def test_{func}():
-    """Test {func} function."""
-    # TODO: Add test implementation
-    # result = {func}(...)
-    # assert result == expected
-    pass
-''')
-                
-                for cls in classes:
-                    tests.append(f'''class Test{cls}:
-    """Tests for {cls} class."""
-    
-    def test_init(self):
-        """Test {cls} initialization."""
-        # instance = {cls}(...)
-        # assert instance is not None
-        pass
-''')
-                
-                return "\n".join(tests)
-            
-            return f"Test generation for {language} is not yet implemented."
-        
-        def explain_code(code: str, language: str = "python") -> str:
-            """
-            Provide a detailed explanation of the code.
-            
-            Args:
-                code: The code to explain
-                language: Programming language
-            """
-            # This would typically use the LLM itself
-            # For now, provide structural analysis
-            lines = code.split("\n")
-            
-            explanation = [f"## Code Analysis ({language})", ""]
-            explanation.append(f"**Total lines:** {len(lines)}")
-            explanation.append(f"**Non-empty lines:** {len([l for l in lines if l.strip()])}")
-            
-            if language == "python":
-                import re
-                imports = [l for l in lines if l.strip().startswith(("import ", "from "))]
-                functions = re.findall(r'def (\w+)\(', code)
-                classes = re.findall(r'class (\w+)', code)
-                
-                if imports:
-                    explanation.append(f"\n**Imports:** {len(imports)}")
-                    for imp in imports[:5]:
-                        explanation.append(f"  - {imp.strip()}")
-                        
-                if classes:
-                    explanation.append(f"\n**Classes:** {', '.join(classes)}")
-                    
-                if functions:
-                    explanation.append(f"\n**Functions:** {', '.join(functions)}")
-            
-            explanation.append("\n*For detailed explanation, ask me to walk through the code step by step.*")
-            
-            return "\n".join(explanation)
-        
-        def write_file(filename: str, content: str) -> str:
-            """
-            Write content to a file in the workspace.
-            
-            Args:
-                filename: Name of the file to create
-                content: Content to write
-            """
-            filepath = Path(self.workspace_dir) / filename
-            
-            # Security: prevent path traversal
-            if ".." in filename or filename.startswith("/"):
-                return "Error: Invalid filename. Cannot use '..' or absolute paths."
-            
-            try:
-                filepath.parent.mkdir(parents=True, exist_ok=True)
-                filepath.write_text(content)
-                return f"File written successfully: {filepath}"
-            except Exception as e:
-                return f"Error writing file: {str(e)}"
-        
-        def read_file(filename: str) -> str:
-            """
-            Read content from a file in the workspace.
-            
-            Args:
-                filename: Name of the file to read
-            """
-            filepath = Path(self.workspace_dir) / filename
-            
-            if ".." in filename or filename.startswith("/"):
-                return "Error: Invalid filename."
-            
-            try:
-                if not filepath.exists():
-                    return f"File not found: {filename}"
-                return filepath.read_text()
-            except Exception as e:
-                return f"Error reading file: {str(e)}"
-        
-        def list_files(directory: str = ".") -> str:
-            """
-            List files in the workspace directory.
-            
-            Args:
-                directory: Subdirectory to list (default: workspace root)
-            """
-            dirpath = Path(self.workspace_dir) / directory
-            
-            if ".." in directory:
-                return "Error: Invalid directory."
-            
-            try:
-                if not dirpath.exists():
-                    return f"Directory not found: {directory}"
-                
-                files = []
-                for item in sorted(dirpath.iterdir()):
-                    prefix = "📁 " if item.is_dir() else "📄 "
-                    files.append(f"{prefix}{item.name}")
-                
-                return "\n".join(files) if files else "Directory is empty."
-            except Exception as e:
-                return f"Error listing files: {str(e)}"
-        
-        return [
-            execute_code,
-            analyze_code,
-            search_code_patterns,
-            generate_tests,
-            explain_code,
-            write_file,
-            read_file,
-            list_files,
-        ]
-    
-    def create(self) -> Agent:
-        """Create the coding agent with development tools."""
-        return Agent(
-            name="Coding Agent",
-            model=self.model,
-            instructions=CODING_INSTRUCTIONS,
-            functions=self._create_coding_functions(),
-        )
-
-
-def _execute_compiled(code: str, language: str, workspace: str, timeout: int) -> str:
-    """Execute compiled languages via temporary files."""
-    import uuid
-    
-    extensions = {
-        "go": ".go",
-        "rust": ".rs",
-        "java": ".java",
-        "c": ".c",
-        "cpp": ".cpp",
-    }
-    
-    compilers = {
-        "go": ["go", "run"],
-        "rust": ["rustc", "-o", "out", "{file}", "&&", "./out"],
-        "java": ["javac", "{file}", "&&", "java", "{class}"],
-        "c": ["gcc", "-o", "out", "{file}", "&&", "./out"],
-        "cpp": ["g++", "-o", "out", "{file}", "&&", "./out"],
-    }
-    
-    ext = extensions.get(language)
-    if not ext:
-        return f"Unsupported compiled language: {language}"
-    
-    filename = f"temp_{uuid.uuid4().hex[:8]}{ext}"
-    filepath = Path(workspace) / filename
-    
+            "context_manager": '''from contextlib import contextmanager
+@contextmanager
+def managed_resource():
+    resource = acquire()
     try:
-        filepath.write_text(code)
-        
-        if language == "go":
-            result = subprocess.run(
-                ["go", "run", str(filepath)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=workspace,
-            )
-        elif language in ("c", "cpp"):
-            compiler = "gcc" if language == "c" else "g++"
-            outfile = Path(workspace) / "out"
-            compile_result = subprocess.run(
-                [compiler, "-o", str(outfile), str(filepath)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            if compile_result.returncode != 0:
-                return f"Compilation error:\n{compile_result.stderr}"
-            result = subprocess.run(
-                [str(outfile)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=workspace,
-            )
-        else:
-            return f"Execution for {language} not implemented."
-        
-        output = ""
-        if result.stdout:
-            output += f"STDOUT:\n{result.stdout}\n"
-        if result.stderr:
-            output += f"STDERR:\n{result.stderr}\n"
-        output += f"Exit code: {result.returncode}"
-        
-        return output or "Code executed successfully with no output."
-        
-    except subprocess.TimeoutExpired:
-        return f"Execution timed out after {timeout} seconds."
-    except Exception as e:
-        return f"Execution error: {str(e)}"
+        yield resource
     finally:
-        # Cleanup
-        try:
-            filepath.unlink(missing_ok=True)
-            (Path(workspace) / "out").unlink(missing_ok=True)
-        except:
-            pass
+        release(resource)''',
+            "async": '''import asyncio
+async def fetch_data(url):
+    await asyncio.sleep(1)
+    return f"Data from {url}"
+
+async def main():
+    results = await asyncio.gather(
+        fetch_data("url1"),
+        fetch_data("url2"),
+    )
+    return results''',
+        },
+        "javascript": {
+            "singleton": '''const Singleton = (() => {
+    let instance;
+    return {
+        getInstance: () => {
+            if (!instance) instance = { data: "singleton" };
+            return instance;
+        }
+    };
+})();''',
+            "async": '''async function fetchWithRetry(url, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const response = await fetch(url);
+            return await response.json();
+        } catch (error) {
+            if (i === retries - 1) throw error;
+            await new Promise(r => setTimeout(r, 1000));
+        }
+    }
+}''',
+        },
+    }
+    
+    lang_patterns = patterns.get(language, {})
+    query_lower = query.lower()
+    
+    matches = {k: v for k, v in lang_patterns.items() if query_lower in k.lower()}
+    
+    return {
+        "query": query,
+        "language": language,
+        "matches": matches,
+        "match_count": len(matches),
+        "available": list(lang_patterns.keys()),
+    }
 
 
-def create_coding_agent(
-    model: str = "meta-llama/Llama-3.1-8B-Instruct",
-    workspace_dir: Optional[str] = None,
-    enable_execution: bool = True,
-) -> Agent:
+def generate_tests(code: str, language: str, framework: str = "auto") -> Dict[str, Any]:
     """
-    Create a coding agent with development tools.
+    Generate unit tests for the given code.
     
     Args:
-        model: Model to use for the coding agent
-        workspace_dir: Directory for code execution
-        enable_execution: Whether to allow code execution
-        
-    Returns:
-        Configured Coding Agent
+        code: The code to generate tests for
+        language: Programming language
+        framework: Test framework (auto, pytest, jest, go)
     """
-    factory = CodingAgent(
-        model=model,
-        workspace_dir=workspace_dir,
-        enable_execution=enable_execution,
-    )
-    return factory.create()
+    if framework == "auto":
+        framework = {"python": "pytest", "javascript": "jest", "typescript": "jest", "go": "go"}.get(language, "generic")
+    
+    templates = {
+        "pytest": '''import pytest
+
+class TestCode:
+    def test_basic(self):
+        # result = function(input)
+        # assert result == expected
+        pass
+    
+    def test_edge_cases(self):
+        pass
+    
+    def test_errors(self):
+        with pytest.raises(ValueError):
+            pass''',
+        "jest": '''describe('Code', () => {
+    test('basic functionality', () => {
+        // expect(result).toBe(expected);
+    });
+    
+    test('edge cases', () => {
+    });
+    
+    test('error handling', () => {
+        // expect(() => fn()).toThrow();
+    });
+});''',
+        "go": '''package main
+
+import "testing"
+
+func TestBasic(t *testing.T) {
+    // if result != expected {
+    //     t.Errorf("Expected %v, got %v", expected, result)
+    // }
+}
+
+func TestEdgeCases(t *testing.T) {
+    tests := []struct {
+        name string
+        input string
+        want string
+    }{
+        {"empty", "", ""},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+        })
+    }
+}''',
+    }
+    
+    return {
+        "language": language,
+        "framework": framework,
+        "test_code": templates.get(framework, "// Tests not available for this framework"),
+    }
+
+
+def explain_code(code: str, language: str) -> Dict[str, Any]:
+    """
+    Analyze code structure and provide explanation hints.
+    
+    Args:
+        code: The code to explain
+        language: Programming language
+    """
+    lines = code.strip().split("\n")
+    
+    indicators = {
+        "loops": sum(1 for l in lines if any(k in l for k in ["for ", "while ", "loop "])),
+        "conditionals": sum(1 for l in lines if any(k in l for k in ["if ", "else", "elif", "switch", "match"])),
+        "functions": sum(1 for l in lines if any(k in l for k in ["def ", "function ", "fn ", "func "])),
+        "classes": sum(1 for l in lines if any(k in l for k in ["class ", "struct ", "interface "])),
+    }
+    
+    total = sum(indicators.values())
+    complexity = "simple" if total <= 3 else "moderate" if total <= 10 else "complex"
+    
+    return {
+        "language": language,
+        "line_count": len(lines),
+        "complexity": complexity,
+        "indicators": indicators,
+    }
+
+
+def suggest_improvements(code: str, language: str, focus: str = "all") -> Dict[str, Any]:
+    """
+    Suggest improvements for the given code.
+    
+    Args:
+        code: The code to improve
+        language: Programming language
+        focus: Area to focus on (all, performance, readability, security)
+    """
+    import re
+    
+    suggestions = []
+    lines = code.split("\n")
+    
+    # Long functions
+    func_lines = 0
+    for line in lines:
+        if any(k in line for k in ["def ", "function ", "fn "]):
+            func_lines = 0
+        func_lines += 1
+        if func_lines > 50:
+            suggestions.append({"category": "maintainability", "suggestion": "Break down long functions"})
+            break
+    
+    # Magic numbers
+    if re.findall(r'\b\d{2,}\b', code):
+        suggestions.append({"category": "readability", "suggestion": "Use named constants for magic numbers"})
+    
+    # Deep nesting
+    max_indent = max((len(l) - len(l.lstrip()) for l in lines if l.strip()), default=0)
+    if max_indent > 16:
+        suggestions.append({"category": "readability", "suggestion": "Reduce nesting with early returns"})
+    
+    if focus != "all":
+        suggestions = [s for s in suggestions if s["category"] == focus]
+    
+    return {
+        "language": language,
+        "focus": focus,
+        "suggestions": suggestions,
+        "count": len(suggestions),
+    }
+
+
+# Default instructions
+CODING_INSTRUCTIONS = """You are an expert software developer and coding assistant.
+
+## Capabilities
+
+- **Code Generation**: Write clean, efficient code in Python, JavaScript, TypeScript, Go, Rust, and more
+- **Code Review**: Analyze code for bugs, security issues, and improvements
+- **Debugging**: Identify and fix issues systematically
+- **Testing**: Generate comprehensive unit tests
+- **Documentation**: Explain code and add documentation
+
+## Available Tools
+
+### File Operations
+- `file_read(path, max_lines, start_line)`: Read files or list directories
+- `file_write(operation, path, content, old_text, new_text)`: Write/edit files
+- `glob(pattern, max_results)`: Find files matching patterns
+- `grep(pattern, path, file_pattern, context_lines)`: Search file contents
+
+### Code Execution
+- `execute_code(code, language, timeout)`: Run code (python, javascript, typescript, bash, go)
+- `python_repl(code, reset)`: Interactive Python with persistent state
+- `bash(command, timeout)`: Execute shell commands
+
+### Memory
+- `memory(command, path, content)`: Persistent storage (view, create, edit, delete)
+
+### Analysis
+- `analyze_code(code, language)`: Static analysis
+- `search_code_patterns(query, language)`: Find code patterns
+- `generate_tests(code, language, framework)`: Create unit tests
+- `explain_code(code, language)`: Analyze code structure
+- `suggest_improvements(code, language, focus)`: Get improvement suggestions
+
+## Workflow
+
+1. **Understand**: Clarify requirements before coding
+2. **Plan**: Outline the approach
+3. **Implement**: Write code incrementally
+4. **Test**: Verify with execute_code or tests
+5. **Refine**: Improve based on feedback
+
+## Best Practices
+
+- Write clean, readable code
+- Include error handling
+- Follow language conventions
+- Test your code
+- Document complex logic"""

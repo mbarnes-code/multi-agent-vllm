@@ -165,7 +165,11 @@ Retrieval-Augmented Generation agent for knowledge-intensive tasks.
 
 ### Coding Agent
 
-Autonomous coding agent for software development tasks.
+Autonomous coding agent for software development tasks. Enhanced with patterns from:
+- `claude-quickstarts/autonomous-coding` - Autonomous development workflows
+- `claude-quickstarts/agents` - Tool implementations
+- `claude-cookbooks/tool_use` - Memory and file tools
+- `claude-plugins-official` - Code review and feature development
 
 **Capabilities:**
 - Code generation in multiple languages
@@ -173,21 +177,37 @@ Autonomous coding agent for software development tasks.
 - Code review and refactoring
 - Test generation
 - Code explanation
+- Security-validated code execution
+- Persistent memory storage
 
 **Tools:**
-- `execute_code(code, language)` - Run code in sandbox
-- `analyze_code(code, language)` - Static analysis
-- `search_code_patterns(query, language)` - Find patterns
-- `generate_tests(code, language)` - Create unit tests
-- `explain_code(code, language)` - Detailed explanation
-- `write_file(filename, content)` - Write to workspace
-- `read_file(filename)` - Read from workspace
-- `list_files(directory)` - List workspace files
+
+| Tool | Description |
+|------|-------------|
+| `file_read(path, max_lines, start_line)` | Read files or list directories |
+| `file_write(operation, path, content, old_text, new_text)` | Write/edit files |
+| `glob(pattern, max_results)` | Find files matching patterns |
+| `grep(pattern, path, file_pattern, context_lines)` | Search file contents |
+| `execute_code(code, language, timeout)` | Run code in sandbox |
+| `python_repl(code, reset)` | Interactive Python with persistent state |
+| `bash(command, timeout)` | Execute shell commands (security-validated) |
+| `memory(command, path, content)` | Persistent storage (view, create, edit, delete) |
+| `analyze_code(code, language)` | Static analysis for bugs and issues |
+| `search_code_patterns(query, language)` | Find common code patterns |
+| `generate_tests(code, language, framework)` | Create unit tests |
+| `explain_code(code, language)` | Analyze code structure |
+| `suggest_improvements(code, language, focus)` | Get improvement suggestions |
 
 **Supported Languages:**
 - Python, JavaScript, TypeScript
 - Go, Rust, Java
 - C, C++, Bash
+
+**Security Features:**
+- Command allowlist validation
+- Path traversal prevention
+- Dangerous pattern detection
+- Execution timeout protection
 
 ### Image Understanding Agent
 
@@ -212,20 +232,35 @@ Visual analysis agent for multimodal tasks.
 
 ```
 multi_agent/
-├── __init__.py          # Package exports
-├── core.py              # Swarm implementation
-├── server.py            # FastAPI server
-├── main.py              # Entry point
-├── agents/
-│   ├── __init__.py
-│   ├── supervisor.py    # Supervisor agent
-│   ├── rag.py           # RAG agent
-│   ├── coding.py        # Coding agent
-│   └── image_understanding.py
-└── tools/
-    ├── __init__.py
-    └── common.py        # Shared tools
-```
+|-- __init__.py              # Package exports
+|-- core.py                  # Swarm implementation
+|-- server.py                # FastAPI server
+|-- main.py                  # Entry point
+|-- agents/
+|   |-- __init__.py
+|   |-- supervisor.py        # Supervisor agent
+|   |-- rag.py               # RAG agent
+|   |-- coding.py            # Coding agent (enhanced)
+|   +-- image_understanding.py
+|-- tools/
+|   |-- __init__.py
+|   |-- base.py              # Tool base classes
+|   |-- file_tools.py        # File operations
+|   |-- code_execution.py    # Code execution and bash
+|   |-- memory_tool.py       # Persistent memory storage
+|   |-- security.py          # Security validation
+|   +-- common.py            # Utility functions
+|-- prompts/
+|   |-- __init__.py
+|   |-- coding_system.md     # Coding agent system prompt
+|   |-- code_review.md       # Code review workflow
+|   |-- feature_dev.md       # Feature development
+|   |-- code_architect.md    # Architecture design
+|   +-- debugging.md         # Debugging workflow
++-- utils/
+    |-- __init__.py
+    |-- tool_executor.py     # Tool execution utilities
+    +-- progress.py          # Progress tracking
 
 ### Adding New Agents
 
