@@ -188,7 +188,7 @@ validate_manifests() {
             # Check YAML syntax
             for yaml_file in "$dir"/*.yaml; do
                 if [[ -f "$yaml_file" ]]; then
-                    if python3 -c "import yaml; yaml.safe_load(open('$yaml_file'))" >/dev/null 2>&1; then
+                    if python3 -c "import yaml; list(yaml.safe_load_all(open('$yaml_file')))" >/dev/null 2>&1; then
                         log_success "YAML syntax valid: $(basename "$yaml_file")"
                     else
                         log_error "YAML syntax invalid: $(basename "$yaml_file")"
