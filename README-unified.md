@@ -2,11 +2,15 @@
 
 ## Overview
 
-This unified deployment system consolidates the separate DGX Spark configurations into a single, comprehensive installation that deploys:
+This unified deployment system consolidates the separate DGX Spark configurations into a single, comprehensive installation that deploys a **VLLM-based multi-agent system** across **2 DGX Spark nodes**:
 
-- **Kubernetes cluster** with InfiniBand fabric networking
-- **VLLM model serving** with Ray distributed inference
-- **Multi-agent chatbot** with specialized agent types
+- **Kubernetes cluster** with InfiniBand fabric networking (200Gbps)
+- **VLLM model serving** with Ray distributed inference across both nodes
+- **Multi-agent chatbot** with Swarm-style orchestration:
+  - **Supervisor Agent** - Routes requests to specialized agents
+  - **RAG Agent** - Knowledge retrieval and document search
+  - **Coding Agent** - Code generation, debugging, and development (based on autonomous-coding patterns)
+  - **Image Understanding Agent** - Visual analysis and multimodal tasks
 - **Multi-modal inference** capabilities (text, image, code generation)
 - **Unified management interface** for monitoring and control
 
@@ -37,8 +41,359 @@ This unified deployment system consolidates the separate DGX Spark configuration
    ./deploy-unified.sh status
    ```
 
+## Multi-Agent System
+
+### Agent Architecture
+
+The multi-agent system uses **Swarm-style orchestration** where a supervisor agent routes requests to specialized agents:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      User Request                           │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Supervisor Agent                          │
+│  Model: gpt-oss-120b                                        │
+│  • Analyzes request intent                                  │
+│  • Routes to specialized agent                              │
+│  • Coordinates multi-agent tasks                            │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+          ┌───────────────┼───────────────┐
+          │               │               │
+          ▼               ▼               ▼
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│  RAG Agent  │   │Coding Agent │   │ Image Agent │
+│ gpt-oss-20b │   │ Llama-3.1-8B│   │   Phi-4     │
+│             │   │             │   │             │
+│ • Search    │   │ • Generate  │   │ • Analyze   │
+│ • Retrieve  │   │ • Debug     │   │ • OCR       │
+│ • Summarize │   │ • Test      │   │ • Describe  │
+└─────────────┘   └─────────────┘   └─────────────┘
+```
+
+### Available Agents
+
+| Agent | Model | Capabilities |
+|-------|-------|--------------|
+| **Supervisor** | `gpt-oss-120b` | Request routing, coordination, general assistance |
+| **RAG Agent** | `gpt-oss-20b` | Knowledge retrieval, document search, Q&A with citations |
+| **Coding Agent** | `Llama-3.1-8B-Instruct` | Code generation, debugging, testing, code review |
+| **Image Agent** | `Phi-4` | Image analysis, OCR, visual Q&A |
+
+### Coding Agent Features
+
+The Coding Agent is based on patterns from `claude-quickstarts/autonomous-coding` and provides:
+
+**Capabilities:**
+- Code generation in Python, JavaScript, TypeScript, Go, Rust, Java, C/C++, Bash
+- Code execution in sandboxed environment
+- Static code analysis
+- Unit test generation
+- Code explanation and documentation
+- File management in workspace
+
+**Available Tools:**
+- `execute_code(code, language)` - Run code safely
+- `analyze_code(code, language)` - Static analysis
+- `search_code_patterns(query, language)` - Find patterns
+- `generate_tests(code, language)` - Create unit tests
+- `write_file(filename, content)` - Write to workspace
+- `read_file(filename)` - Read from workspace
+- `list_files(directory)` - List workspace files
+
 ## Configuration
 
 ### Key Configuration Files
 
-| File | Purpose | Description |\n|------|---------|-------------|\n| `unified-config.env` | Main configuration | Network, models, resource settings |\n| `unified-config.local.env` | Local overrides | User-specific settings (gitignored) |\n| `unified-deployments/` | Kubernetes manifests | Declarative service definitions |\n\n### Network Configuration\n\n```bash\n# Control plane (LAN access)\nCONTROL_PLANE_API_IP=192.168.86.50\nCONTROL_PLANE_INTERFACE=enp65s0\n\n# High-speed fabric (InfiniBand)\nFABRIC_CTRL_IP=10.10.10.1\nFABRIC_CTRL_INTERFACE=enP7s7\n\n# Worker node\nWORKER_NODE_IP=10.10.10.2\nWORKER_NODE_SSH_TARGET=192.168.86.39\n```\n\n### Model Configuration\n\n```bash\n# Primary model for supervisor agent\nMODEL=\"openai/gpt-oss-120b\"\n\n# Distributed serving settings\nTENSOR_PARALLEL=2\nGPU_MEMORY_UTIL=0.90\nMAX_MODEL_LEN=8192\n```\n\n## Architecture\n\n### Component Overview\n\n```mermaid\ngraph TB\n    subgraph \"DGX Spark 1 (Head)\"\n        K8S1[Kubernetes Master]\n        VLLM1[VLLM Ray Head]\n        UI[Cluster UI]\n    end\n    \n    subgraph \"DGX Spark 2 (Worker)\"\n        K8S2[Kubernetes Worker]\n        VLLM2[VLLM Ray Worker]\n    end\n    \n    subgraph \"Services\"\n        AGENTS[Multi-Agent Backend]\n        DB[(PostgreSQL)]\n        VECTOR[(Milvus)]\n        COMFYUI[ComfyUI]\n    end\n    \n    K8S1 ---|200G InfiniBand| K8S2\n    VLLM1 ---|Ray Cluster| VLLM2\n    AGENTS --> VLLM1\n    AGENTS --> DB\n    AGENTS --> VECTOR\n```\n\n### Kubernetes Namespaces\n\n| Namespace | Components | Purpose |\n|-----------|------------|--------|\n| `vllm-system` | VLLM Ray head/workers, model cache | Model serving infrastructure |\n| `agents-system` | Agent backend, PostgreSQL, Milvus | Multi-agent chatbot services |\n| `multimodal-system` | ComfyUI, image generation | Multi-modal inference |\n| `monitoring-system` | Prometheus, Grafana | Observability stack |\n\n### Storage Architecture\n\n| Volume | Size | Purpose | Mount Path |\n|--------|------|---------|------------|\n| `hf-cache` | 500Gi | HuggingFace model cache | `/raid/hf-cache` |\n| `model-cache` | 1Ti | Additional model storage | `/raid/model-cache` |\n| `agent-data` | 100Gi | Agent conversations, state | `/raid/agent-data` |\n| `multimodal-cache` | 200Gi | Generated images, assets | `/raid/multimodal-cache` |\n\n## Usage\n\n### Management Interfaces\n\n| Service | URL | Purpose |\n|---------|-----|--------|\n| Enhanced Cluster UI | `http://<head-ip>:5000` | Unified monitoring dashboard |\n| VLLM API | `http://<head-ip>:8000` | OpenAI-compatible API |\n| Ray Dashboard | `http://<head-ip>:8265` | Distributed serving monitoring |\n| Agent Backend | `http://<head-ip>:8001` | Multi-agent API |\n| Kubernetes Dashboard | `https://<head-ip>:6443` | K8s cluster management |\n\n### API Usage Examples\n\n#### VLLM Inference\n\n```bash\n# Chat completion\ncurl -X POST \"http://<head-ip>:8000/v1/chat/completions\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"model\": \"gpt-oss-120b\",\n    \"messages\": [\n      {\"role\": \"user\", \"content\": \"Explain quantum computing\"}\n    ],\n    \"max_tokens\": 1000\n  }'\n```\n\n#### Multi-Agent Chat\n\n```bash\n# Route to specialized agent\ncurl -X POST \"http://<head-ip>:8001/chat\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"message\": \"Generate a Python function to calculate fibonacci\",\n    \"agent_type\": \"code_generation\",\n    \"session_id\": \"user123\"\n  }'\n```\n\n### Kubectl Operations\n\n```bash\n# Check all pods\nkubectl get pods --all-namespaces\n\n# Monitor VLLM logs\nkubectl logs -f deployment/vllm-ray-head -n vllm-system\n\n# Check GPU allocation\nkubectl describe nodes\n\n# Scale agent backend\nkubectl scale deployment agent-backend --replicas=3 -n agents-system\n```\n\n## Troubleshooting\n\n### Common Issues\n\n#### VLLM Service Not Starting\n\n1. **Check GPU availability**:\n   ```bash\n   kubectl describe nodes | grep nvidia.com/gpu\n   nvidia-smi\n   ```\n\n2. **Verify model download**:\n   ```bash\n   kubectl logs deployment/vllm-ray-head -n vllm-system\n   ```\n\n3. **Check HuggingFace token**:\n   ```bash\n   kubectl get secret hf-token -n vllm-system -o yaml\n   ```\n\n#### Network Connectivity Issues\n\n1. **Verify InfiniBand interfaces**:\n   ```bash\n   ibdev2netdev\n   ip addr show\n   ```\n\n2. **Test worker connectivity**:\n   ```bash\n   ssh <worker-user>@<worker-ip> hostname\n   ```\n\n3. **Check Kubernetes network**:\n   ```bash\n   kubectl get nodes\n   kubectl get pods -n kube-system\n   ```\n\n#### Agent Backend Connection Errors\n\n1. **Verify VLLM service endpoint**:\n   ```bash\n   kubectl get svc vllm-service -n vllm-system\n   kubectl exec -it deployment/agent-backend -n agents-system -- curl http://vllm-service.vllm-system.svc.cluster.local:8000/health\n   ```\n\n2. **Check database connectivity**:\n   ```bash\n   kubectl logs deployment/postgres -n agents-system\n   kubectl exec -it deployment/agent-backend -n agents-system -- ping postgres\n   ```\n\n### Performance Tuning\n\n#### GPU Memory Optimization\n\n```bash\n# Adjust GPU memory utilization\nkubectl patch configmap vllm-config -n vllm-system --patch '{\n  \"data\": {\n    \"gpu_memory_util\": \"0.85\"\n  }\n}'\nkubectl rollout restart deployment/vllm-ray-head -n vllm-system\n```\n\n#### Ray Cluster Scaling\n\n```bash\n# Scale Ray workers\nkubectl scale daemonset vllm-ray-worker --replicas=2 -n vllm-system\n```\n\n### Log Locations\n\n| Component | Log Location | Command |\n|-----------|--------------|--------|\n| VLLM | Kubernetes logs | `kubectl logs -f deployment/vllm-ray-head -n vllm-system` |\n| Agents | Kubernetes logs | `kubectl logs -f deployment/agent-backend -n agents-system` |\n| Cluster UI | Local file | `tail -f dgx-spark-toolkit/cluster-control-ui/ui-enhanced.log` |\n| Kubernetes | systemd/journald | `journalctl -u kubelet -f` |\n\n## Advanced Configuration\n\n### Custom Model Deployment\n\n```yaml\n# Add to unified-config.env\nMODEL=\"huggingface/your-custom-model\"\nMAX_MODEL_LEN=16384\nTENSOR_PARALLEL=4\n```\n\n### Multi-Model Serving\n\n```bash\n# Deploy additional VLLM instance\nkubectl apply -f - << 'EOF'\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: vllm-secondary\n  namespace: vllm-system\nspec:\n  # ... (similar to primary but different model)\nEOF\n```\n\n### Resource Limits\n\n```yaml\n# Adjust in deployment manifests\nresources:\n  requests:\n    memory: \"32Gi\"\n    cpu: \"8\"\n    nvidia.com/gpu: \"2\"\n  limits:\n    memory: \"64Gi\"\n    nvidia.com/gpu: \"4\"\n```\n\n## Development\n\n### Local Testing\n\n```bash\n# Test configuration without deployment\n./deploy-unified.sh --dry-run\n\n# Deploy only specific components\nENABLE_VLLM=1 ENABLE_MULTI_AGENT=0 ENABLE_MULTIMODAL=0 ./deploy-unified.sh\n```\n\n### Adding New Agent Types\n\n1. **Extend agent backend**:\n   ```python\n   # In unified-deployments/agents/agents-deployment.yaml\n   # Add new agent type to the backend configuration\n   ```\n\n2. **Update model mapping**:\n   ```bash\n   # In unified-config.env\n   CUSTOM_AGENT_MODEL=\"your-model-here\"\n   ```\n\n### Monitoring Extensions\n\n```python\n# Add to cluster-ui-enhanced.py\ndef get_custom_metrics():\n    # Your custom monitoring logic\n    return metrics\n```\n\n## Support\n\n### Health Checks\n\n```bash\n# Comprehensive system health check\n./deploy-unified.sh status\n\n# Individual component health\nkubectl get pods --all-namespaces\nkubectl top nodes\nkubectl top pods --all-namespaces\n```\n\n### Backup and Recovery\n\n```bash\n# Backup configuration\nkubectl get configmaps --all-namespaces -o yaml > backup-configmaps.yaml\nkubectl get secrets --all-namespaces -o yaml > backup-secrets.yaml\n\n# Backup persistent data\ntarsnap -cf backup-$(date +%Y%m%d) /raid/\n```\n\n### Cleanup\n\n```bash\n# Remove all components\n./deploy-unified.sh cleanup\n\n# Manual cleanup\nkubectl delete namespace vllm-system agents-system multimodal-system monitoring-system\n```\n\n## Contributing\n\nSee individual component documentation:\n- [DGX Spark Toolkit](./dgx-spark-toolkit/README.md)\n- [VLLM DGX Spark](./vllm-dgx-spark/README.md) \n- [DGX Spark Playbooks](./dgx-spark-playbooks/README.md)\n\n## License\n\nSee individual component licenses in their respective directories.\n
+| File | Purpose | Description |
+|------|---------|-------------|
+| `unified-config.env` | Main configuration | Network, models, resource settings |
+| `unified-config.local.env` | Local overrides | User-specific settings (gitignored) |
+| `unified-deployments/` | Kubernetes manifests | Declarative service definitions |
+| `unified-deployments/multi-agent/` | Multi-agent package | Python package with Swarm implementation |
+
+### Network Configuration
+
+```bash
+# Control plane (LAN access)
+CONTROL_PLANE_API_IP=192.168.86.50
+CONTROL_PLANE_INTERFACE=enp65s0
+
+# High-speed fabric (InfiniBand)
+FABRIC_CTRL_IP=10.10.10.1
+FABRIC_CTRL_INTERFACE=enP7s7
+
+# Worker node
+WORKER_NODE_IP=10.10.10.2
+WORKER_NODE_SSH_TARGET=192.168.86.39
+```
+
+### Model Configuration
+
+```bash
+# Primary model for supervisor agent
+MODEL="openai/gpt-oss-120b"
+
+# Agent-specific models
+SUPERVISOR_MODEL="gpt-oss-120b"
+RAG_MODEL="gpt-oss-20b"
+CODING_MODEL="meta-llama/Llama-3.1-8B-Instruct"
+IMAGE_MODEL="microsoft/Phi-4"
+
+# Distributed serving settings
+TENSOR_PARALLEL=2
+GPU_MEMORY_UTIL=0.90
+MAX_MODEL_LEN=8192
+```
+
+## Architecture
+
+### Component Overview
+
+```mermaid
+graph TB
+    subgraph "DGX Spark 1 (Head)"
+        K8S1[Kubernetes Master]
+        VLLM1[VLLM Ray Head]
+        UI[Cluster UI]
+    end
+    
+    subgraph "DGX Spark 2 (Worker)"
+        K8S2[Kubernetes Worker]
+        VLLM2[VLLM Ray Worker]
+    end
+    
+    subgraph "Services"
+        AGENTS[Multi-Agent Backend]
+        DB[(PostgreSQL)]
+        VECTOR[(Milvus)]
+    end
+    
+    K8S1 ---|200G InfiniBand| K8S2
+    VLLM1 ---|Ray Cluster| VLLM2
+    AGENTS --> VLLM1
+    AGENTS --> DB
+    AGENTS --> VECTOR
+```
+
+### Kubernetes Namespaces
+
+| Namespace | Components | Purpose |
+|-----------|------------|---------|
+| `vllm-system` | VLLM Ray head/workers, model cache | Model serving infrastructure |
+| `agents-system` | Agent backend, PostgreSQL, Milvus | Multi-agent chatbot services |
+| `multimodal-system` | ComfyUI, image generation | Multi-modal inference |
+| `monitoring-system` | Prometheus, Grafana | Observability stack |
+
+### Storage Architecture
+
+| Volume | Size | Purpose | Mount Path |
+|--------|------|---------|------------|
+| `hf-cache` | 500Gi | HuggingFace model cache | `/raid/hf-cache` |
+| `model-cache` | 1Ti | Additional model storage | `/raid/model-cache` |
+| `agent-data` | 100Gi | Agent conversations, state | `/raid/agent-data` |
+
+## Usage
+
+### Management Interfaces
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| Enhanced Cluster UI | `http://<head-ip>:5000` | Unified monitoring dashboard |
+| VLLM API | `http://<head-ip>:8000` | OpenAI-compatible API |
+| Ray Dashboard | `http://<head-ip>:8265` | Distributed serving monitoring |
+| Agent Backend | `http://<head-ip>:8000` (agents-system) | Multi-agent API |
+
+### API Usage Examples
+
+#### Multi-Agent Chat (Supervisor Routing)
+
+```bash
+# Let supervisor route to appropriate agent
+curl -X POST "http://<head-ip>:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Write a Python function to calculate fibonacci numbers",
+    "session_id": "user123"
+  }'
+```
+
+#### Direct Agent Access
+
+```bash
+# Direct to coding agent
+curl -X POST "http://<head-ip>:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Debug this code: def foo(): return bar",
+    "agent_type": "coding",
+    "session_id": "user123"
+  }'
+
+# Direct to RAG agent
+curl -X POST "http://<head-ip>:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Search for documentation about Kubernetes deployments",
+    "agent_type": "rag",
+    "session_id": "user123"
+  }'
+```
+
+#### List Available Agents
+
+```bash
+curl "http://<head-ip>:8000/agents"
+```
+
+#### VLLM Direct Inference
+
+```bash
+curl -X POST "http://<head-ip>:8000/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "messages": [
+      {"role": "user", "content": "Explain quantum computing"}
+    ],
+    "max_tokens": 1000
+  }'
+```
+
+### Kubectl Operations
+
+```bash
+# Check all pods
+kubectl get pods --all-namespaces
+
+# Monitor VLLM logs
+kubectl logs -f deployment/vllm-ray-head -n vllm-system
+
+# Monitor agent backend logs
+kubectl logs -f deployment/agent-backend -n agents-system
+
+# Check GPU allocation
+kubectl describe nodes | grep nvidia.com/gpu
+
+# Scale agent backend
+kubectl scale deployment agent-backend --replicas=3 -n agents-system
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### VLLM Service Not Starting
+
+1. **Check GPU availability:**
+   ```bash
+   kubectl describe nodes | grep nvidia.com/gpu
+   nvidia-smi
+   ```
+
+2. **Verify model download:**
+   ```bash
+   kubectl logs deployment/vllm-ray-head -n vllm-system
+   ```
+
+3. **Check HuggingFace token:**
+   ```bash
+   kubectl get secret hf-token -n vllm-system -o yaml
+   ```
+
+#### Agent Backend Connection Errors
+
+1. **Verify VLLM service endpoint:**
+   ```bash
+   kubectl get svc vllm-service -n vllm-system
+   kubectl exec -it deployment/agent-backend -n agents-system -- \
+     curl http://vllm-service.vllm-system.svc.cluster.local:8000/health
+   ```
+
+2. **Check agent backend health:**
+   ```bash
+   kubectl logs deployment/agent-backend -n agents-system
+   ```
+
+### Performance Tuning
+
+```bash
+# Adjust GPU memory utilization
+kubectl patch configmap vllm-config -n vllm-system --patch '{
+  "data": {
+    "gpu_memory_util": "0.85"
+  }
+}'
+kubectl rollout restart deployment/vllm-ray-head -n vllm-system
+```
+
+## Development
+
+### Local Testing
+
+```bash
+# Test configuration without deployment
+./deploy-unified.sh --dry-run
+
+# Deploy only specific components
+ENABLE_VLLM=1 ENABLE_MULTI_AGENT=0 ./deploy-unified.sh
+```
+
+### Adding New Agent Types
+
+1. Create agent in `unified-deployments/multi-agent/multi_agent/agents/`
+2. Register in `agents/__init__.py`
+3. Add to supervisor's routing functions
+4. Update ConfigMap with model assignment
+
+### Multi-Agent Package Development
+
+```bash
+cd unified-deployments/multi-agent
+
+# Install for development
+pip install -e ".[dev]"
+
+# Run tests
+pytest tests/
+
+# Run locally
+VLLM_ENDPOINT="http://localhost:8000/v1" python -m multi_agent.server
+```
+
+## Project Structure
+
+```
+unified-deployments/
+├── agents/
+│   └── agents-deployment.yaml    # K8s deployment with embedded multi-agent code
+├── vllm/
+│   └── vllm-deployment.yaml      # VLLM Ray cluster deployment
+├── storage-pvcs.yaml             # Persistent volume claims
+├── cluster-ui-enhanced.py        # Enhanced monitoring UI
+└── multi-agent/                  # Python package (for local dev)
+    ├── pyproject.toml
+    ├── Dockerfile
+    └── multi_agent/
+        ├── core.py               # Swarm implementation
+        ├── server.py             # FastAPI server
+        └── agents/
+            ├── supervisor.py     # Supervisor agent
+            ├── rag.py            # RAG agent
+            ├── coding.py         # Coding agent
+            └── image_understanding.py
+```
+
+## Contributing
+
+See individual component documentation:
+- [DGX Spark Toolkit](./dgx-spark-toolkit/README.md)
+- [VLLM DGX Spark](./vllm-dgx-spark/README.md)
+- [Multi-Agent Package](./unified-deployments/multi-agent/README.md)
+
+## License
+
+See individual component licenses in their respective directories.\n

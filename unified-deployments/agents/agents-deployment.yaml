@@ -1,3 +1,13 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DGX Spark Multi-Agent System - Kubernetes Deployment
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Deploys the complete multi-agent stack including:
+# - PostgreSQL for session/conversation storage
+# - etcd for Milvus coordination
+# - MinIO for Milvus object storage
+# - Milvus vector database for RAG
+# - Multi-agent backend with Swarm orchestration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -6,6 +16,9 @@ metadata:
     name: agents-system
     component: multi-agent-chatbot
 ---
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ Secrets                                                                 │
+# └─────────────────────────────────────────────────────────────────────────┘
 apiVersion: v1
 kind: Secret
 metadata:
@@ -27,16 +40,35 @@ stringData:
   access-key: minioadmin
   secret-key: minioadmin
 ---
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ ConfigMaps                                                              │
+# └─────────────────────────────────────────────────────────────────────────┘
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: agent-config
   namespace: agents-system
 data:
-  models: "gpt-oss-120b,gpt-oss-20b"
-  vllm_endpoint: "http://vllm-service.vllm-system.svc.cluster.local:8000"
+  # VLLM endpoint for model inference
+  vllm_endpoint: "http://vllm-service.vllm-system.svc.cluster.local:8000/v1"
+  
+  # Model assignments for each agent type
+  supervisor_model: "gpt-oss-120b"
+  rag_model: "gpt-oss-20b"
+  coding_model: "meta-llama/Llama-3.1-8B-Instruct"
+  image_model: "microsoft/Phi-4"
+  
+  # Milvus configuration
+  milvus_host: "milvus"
+  milvus_port: "19530"
+  
+  # Feature flags
+  enable_code_execution: "true"
   log_level: "INFO"
 ---
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ PostgreSQL - Session Storage                                           │
+# └─────────────────────────────────────────────────────────────────────────┘
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,6 +76,7 @@ metadata:
   namespace: agents-system
   labels:
     app: postgres
+    component: database
 spec:
   replicas: 1
   selector:
@@ -80,23 +113,13 @@ spec:
           mountPath: /var/lib/postgresql/data
         livenessProbe:
           exec:
-            command:
-            - pg_isready
-            - -U
-            - chatbot_user
-            - -d
-            - chatbot
+            command: ["pg_isready", "-U", "chatbot_user", "-d", "chatbot"]
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 10
         readinessProbe:
           exec:
-            command:
-            - pg_isready
-            - -U
-            - chatbot_user
-            - -d
-            - chatbot
+            command: ["pg_isready", "-U", "chatbot_user", "-d", "chatbot"]
           initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
@@ -124,6 +147,9 @@ spec:
   selector:
     app: postgres
 ---
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ etcd - Milvus Metadata Storage                                         │
+# └─────────────────────────────────────────────────────────────────────────┘
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -131,6 +157,7 @@ metadata:
   namespace: agents-system
   labels:
     app: etcd
+    component: milvus-deps
 spec:
   replicas: 1
   selector:
@@ -155,8 +182,7 @@ spec:
           value: "4294967296"
         - name: ETCD_SNAPSHOT_COUNT
           value: "50000"
-        command:
-        - etcd
+        command: ["etcd"]
         args:
         - --advertise-client-urls=http://127.0.0.1:2379
         - --listen-client-urls=http://0.0.0.0:2379
@@ -166,10 +192,7 @@ spec:
           mountPath: /etcd
         livenessProbe:
           exec:
-            command:
-            - etcdctl
-            - endpoint
-            - health
+            command: ["etcdctl", "endpoint", "health"]
           initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 20
@@ -196,6 +219,9 @@ spec:
   selector:
     app: etcd
 ---
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ MinIO - Milvus Object Storage                                          │
+# └─────────────────────────────────────────────────────────────────────────┘
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -203,6 +229,7 @@ metadata:
   namespace: agents-system
   labels:
     app: minio
+    component: milvus-deps
 spec:
   replicas: 1
   selector:
@@ -229,10 +256,7 @@ spec:
             secretKeyRef:
               name: minio-secret
               key: secret-key
-        command:
-        - minio
-        - server
-        - /minio_data
+        command: ["minio", "server", "/minio_data"]
         volumeMounts:
         - name: minio-data
           mountPath: /minio_data
@@ -266,6 +290,9 @@ spec:
   selector:
     app: minio
 ---
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ Milvus - Vector Database for RAG                                       │
+# └─────────────────────────────────────────────────────────────────────────┘
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -273,6 +300,7 @@ metadata:
   namespace: agents-system
   labels:
     app: milvus
+    component: vector-db
 spec:
   replicas: 1
   selector:
@@ -288,16 +316,15 @@ spec:
         image: milvusdb/milvus:v2.5.15-20250718-3a3b374f-gpu-arm64
         ports:
         - containerPort: 19530
+          name: grpc
         - containerPort: 9091
+          name: metrics
         env:
         - name: ETCD_ENDPOINTS
           value: "etcd:2379"
         - name: MINIO_ADDRESS
           value: "minio:9000"
-        command:
-        - milvus
-        - run
-        - standalone
+        command: ["milvus", "run", "standalone"]
         volumeMounts:
         - name: milvus-data
           mountPath: /var/lib/milvus
@@ -338,15 +365,18 @@ metadata:
   namespace: agents-system
 spec:
   ports:
-  - name: milvus-api
+  - name: grpc
     port: 19530
     targetPort: 19530
-  - name: milvus-web
+  - name: metrics
     port: 9091
     targetPort: 9091
   selector:
     app: milvus
 ---
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ Multi-Agent Backend - Swarm Orchestration                              │
+# └─────────────────────────────────────────────────────────────────────────┘
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -354,6 +384,7 @@ metadata:
   namespace: agents-system
   labels:
     app: agent-backend
+    component: multi-agent
 spec:
   replicas: 1
   selector:
@@ -365,163 +396,501 @@ spec:
         app: agent-backend
     spec:
       initContainers:
-      - name: wait-for-postgres
-        image: postgres:15-alpine
+      - name: wait-for-vllm
+        image: curlimages/curl:latest
         command:
         - sh
         - -c
         - |
-          until pg_isready -h postgres -p 5432 -U chatbot_user; do
-            echo "Waiting for postgres..."
-            sleep 2
+          echo "Waiting for VLLM service..."
+          until curl -sf http://vllm-service.vllm-system.svc.cluster.local:8000/health; do
+            echo "VLLM not ready, waiting..."
+            sleep 10
           done
+          echo "VLLM is ready!"
       containers:
       - name: backend
         image: python:3.11-slim
         ports:
         - containerPort: 8000
+          name: http
         env:
-        - name: POSTGRES_HOST
-          value: "postgres"
-        - name: POSTGRES_DB
-          valueFrom:
-            secretKeyRef:
-              name: postgres-secret
-              key: database
-        - name: POSTGRES_USER
-          valueFrom:
-            secretKeyRef:
-              name: postgres-secret
-              key: username
-        - name: POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: postgres-secret
-              key: password
-        - name: ETCD_ENDPOINTS
-          value: "etcd:2379"
-        - name: MINIO_ADDRESS
-          value: "minio:9000"
-        - name: MILVUS_ADDRESS
-          value: "milvus:19530"
-        - name: MODELS
-          valueFrom:
-            configMapKeyRef:
-              name: agent-config
-              key: models
+        # VLLM Configuration
         - name: VLLM_ENDPOINT
           valueFrom:
             configMapKeyRef:
               name: agent-config
               key: vllm_endpoint
+        # Model Configuration
+        - name: SUPERVISOR_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: supervisor_model
+        - name: RAG_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: rag_model
+        - name: CODING_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: coding_model
+        - name: IMAGE_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: image_model
+        # Milvus Configuration
+        - name: MILVUS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: milvus_host
+        - name: MILVUS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: milvus_port
+        # Feature Flags
+        - name: ENABLE_CODE_EXECUTION
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: enable_code_execution
+        - name: WORKSPACE_DIR
+          value: "/workspace"
+        - name: HOST
+          value: "0.0.0.0"
+        - name: PORT
+          value: "8000"
         command:
         - sh
         - -c
         - |
-          pip install fastapi uvicorn[standard] sqlalchemy asyncpg psycopg2-binary
-          pip install openai httpx pydantic python-multipart
-          pip install pymilvus etcd3 minio
+          set -e
           
-          cat > /app/main.py << 'AGENT_EOF'
-          from fastapi import FastAPI, HTTPException
+          echo "Installing dependencies..."
+          pip install --quiet --no-cache-dir \
+            fastapi uvicorn[standard] openai httpx pydantic \
+            python-multipart structlog tenacity pymilvus
+          
+          echo "Creating multi-agent package..."
+          mkdir -p /app/multi_agent/agents /app/multi_agent/tools
+          
+          # Create core.py - Swarm implementation
+          cat > /app/multi_agent/core.py << 'CORE_EOF'
+          import copy
+          import json
+          import inspect
+          from collections import defaultdict
+          from typing import List, Callable, Union, Optional, Any, Dict
+          from openai import OpenAI
           from pydantic import BaseModel
-          import httpx
+          import structlog
+
+          logger = structlog.get_logger()
+          __CTX_VARS_NAME__ = "context_variables"
+
+          class Agent(BaseModel):
+              name: str = "Agent"
+              model: str = "gpt-oss-120b"
+              instructions: Union[str, Callable[[dict], str]] = "You are a helpful agent."
+              functions: List[Callable] = []
+              tool_choice: Optional[str] = None
+              parallel_tool_calls: bool = True
+              class Config:
+                  arbitrary_types_allowed = True
+
+          class Response(BaseModel):
+              messages: List[Dict[str, Any]] = []
+              agent: Optional[Agent] = None
+              context_variables: dict = {}
+              class Config:
+                  arbitrary_types_allowed = True
+
+          class Result(BaseModel):
+              value: str = ""
+              agent: Optional[Agent] = None
+              context_variables: dict = {}
+              class Config:
+                  arbitrary_types_allowed = True
+
+          def function_to_json(func: Callable) -> dict:
+              type_map = {str: "string", int: "integer", float: "number", bool: "boolean", list: "array", dict: "object"}
+              signature = inspect.signature(func)
+              parameters = {}
+              for param in signature.parameters.values():
+                  if param.name == __CTX_VARS_NAME__:
+                      continue
+                  param_type = type_map.get(param.annotation, "string") if param.annotation != inspect.Parameter.empty else "string"
+                  parameters[param.name] = {"type": param_type}
+              required = [p.name for p in signature.parameters.values() if p.default == inspect.Parameter.empty and p.name != __CTX_VARS_NAME__]
+              return {"type": "function", "function": {"name": func.__name__, "description": func.__doc__ or "", "parameters": {"type": "object", "properties": parameters, "required": required}}}
+
+          class Swarm:
+              def __init__(self, client=None, base_url=None, api_key="not-needed"):
+                  self.client = client or OpenAI(base_url=base_url or "http://localhost:8000/v1", api_key=api_key)
+                  logger.info("swarm_initialized", base_url=base_url)
+
+              def get_chat_completion(self, agent, history, context_variables, model_override=None, stream=False, debug=False):
+                  context_variables = defaultdict(str, context_variables)
+                  instructions = agent.instructions(context_variables) if callable(agent.instructions) else agent.instructions
+                  messages = [{"role": "system", "content": instructions}] + history
+                  tools = [function_to_json(f) for f in agent.functions] if agent.functions else None
+                  if tools:
+                      for tool in tools:
+                          params = tool["function"]["parameters"]
+                          params["properties"].pop(__CTX_VARS_NAME__, None)
+                          if __CTX_VARS_NAME__ in params.get("required", []):
+                              params["required"].remove(__CTX_VARS_NAME__)
+                  create_params = {"model": model_override or agent.model, "messages": messages, "stream": stream}
+                  if tools:
+                      create_params["tools"] = tools
+                      create_params["parallel_tool_calls"] = agent.parallel_tool_calls
+                      if agent.tool_choice:
+                          create_params["tool_choice"] = agent.tool_choice
+                  return self.client.chat.completions.create(**create_params)
+
+              def handle_function_result(self, result, debug=False):
+                  if isinstance(result, Result):
+                      return result
+                  if isinstance(result, Agent):
+                      return Result(value=json.dumps({"assistant": result.name}), agent=result)
+                  return Result(value=str(result))
+
+              def handle_tool_calls(self, tool_calls, functions, context_variables, debug=False):
+                  function_map = {f.__name__: f for f in functions}
+                  partial_response = Response(messages=[], agent=None, context_variables={})
+                  for tool_call in tool_calls:
+                      name = tool_call.function.name
+                      if name not in function_map:
+                          partial_response.messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": f"Error: Tool {name} not found."})
+                          continue
+                      try:
+                          args = json.loads(tool_call.function.arguments)
+                      except:
+                          args = {}
+                      func = function_map[name]
+                      if __CTX_VARS_NAME__ in inspect.signature(func).parameters:
+                          args[__CTX_VARS_NAME__] = context_variables
+                      try:
+                          raw_result = func(**args)
+                          result = self.handle_function_result(raw_result, debug)
+                      except Exception as e:
+                          result = Result(value=f"Error: {str(e)}")
+                      partial_response.messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result.value})
+                      partial_response.context_variables.update(result.context_variables)
+                      if result.agent:
+                          partial_response.agent = result.agent
+                  return partial_response
+
+              def run(self, agent, messages, context_variables=None, model_override=None, stream=False, debug=False, max_turns=10, execute_tools=True):
+                  active_agent = agent
+                  context_variables = copy.deepcopy(context_variables or {})
+                  history = copy.deepcopy(messages)
+                  init_len = len(messages)
+                  while len(history) - init_len < max_turns and active_agent:
+                      completion = self.get_chat_completion(active_agent, history, context_variables, model_override, False, debug)
+                      message = completion.choices[0].message
+                      message_dict = message.model_dump()
+                      message_dict["sender"] = active_agent.name
+                      history.append(message_dict)
+                      if not message.tool_calls or not execute_tools:
+                          break
+                      partial_response = self.handle_tool_calls(message.tool_calls, active_agent.functions, context_variables, debug)
+                      history.extend(partial_response.messages)
+                      context_variables.update(partial_response.context_variables)
+                      if partial_response.agent:
+                          active_agent = partial_response.agent
+                  return Response(messages=history[init_len:], agent=active_agent, context_variables=context_variables)
+          CORE_EOF
+          
+          # Create agents/__init__.py
+          cat > /app/multi_agent/agents/__init__.py << 'AGENTS_INIT_EOF'
+          from .supervisor import create_supervisor_agent
+          from .rag import create_rag_agent
+          from .coding import create_coding_agent
+          from .image import create_image_agent
+          AGENTS_INIT_EOF
+          
+          # Create supervisor agent
+          cat > /app/multi_agent/agents/supervisor.py << 'SUPERVISOR_EOF'
+          from ..core import Agent, Result
+
+          SUPERVISOR_INSTRUCTIONS = """You are a Supervisor Agent coordinating specialized AI agents.
+
+          Available agents:
+          - RAG Agent: Knowledge retrieval, document search, factual Q&A
+          - Coding Agent: Code generation, debugging, development tasks
+          - Image Agent: Visual analysis, OCR, multimodal tasks
+
+          Analyze requests and route to the appropriate agent using transfer functions.
+          For general queries, respond directly."""
+
+          def create_supervisor_agent(model, rag_agent=None, coding_agent=None, image_agent=None):
+              functions = []
+              if rag_agent:
+                  def transfer_to_rag_agent():
+                      """Transfer to RAG Agent for knowledge retrieval tasks."""
+                      return Result(agent=rag_agent)
+                  functions.append(transfer_to_rag_agent)
+              if coding_agent:
+                  def transfer_to_coding_agent():
+                      """Transfer to Coding Agent for programming tasks."""
+                      return Result(agent=coding_agent)
+                  functions.append(transfer_to_coding_agent)
+              if image_agent:
+                  def transfer_to_image_agent():
+                      """Transfer to Image Agent for visual tasks."""
+                      return Result(agent=image_agent)
+                  functions.append(transfer_to_image_agent)
+              return Agent(name="Supervisor", model=model, instructions=SUPERVISOR_INSTRUCTIONS, functions=functions)
+          SUPERVISOR_EOF
+          
+          # Create RAG agent
+          cat > /app/multi_agent/agents/rag.py << 'RAG_EOF'
+          from ..core import Agent
+
+          RAG_INSTRUCTIONS = """You are a RAG Agent for knowledge retrieval.
+          Search the knowledge base, retrieve documents, and answer questions with citations."""
+
+          def create_rag_agent(model, milvus_host="milvus", milvus_port=19530):
+              def search_knowledge_base(query: str, top_k: int = 5) -> str:
+                  """Search knowledge base for relevant documents."""
+                  return f"Searching for: {query} (top {top_k} results)\n[Knowledge base search placeholder]"
+              def get_document(document_id: str) -> str:
+                  """Retrieve document by ID."""
+                  return f"Document {document_id}: [Content placeholder]"
+              return Agent(name="RAG Agent", model=model, instructions=RAG_INSTRUCTIONS, functions=[search_knowledge_base, get_document])
+          RAG_EOF
+          
+          # Create Coding agent
+          cat > /app/multi_agent/agents/coding.py << 'CODING_EOF'
+          import subprocess
           import os
-          import asyncio
-          import logging
+          from pathlib import Path
+          from ..core import Agent
+
+          CODING_INSTRUCTIONS = """You are an expert Coding Agent for software development.
+
+          Capabilities:
+          - Code generation in Python, JavaScript, Go, Rust, etc.
+          - Debugging and code review
+          - Test generation
+          - Code explanation
+
+          Use tools to execute, analyze, and manage code."""
+
+          def create_coding_agent(model, workspace_dir="/workspace", enable_execution=True):
+              Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+              
+              def execute_code(code: str, language: str = "python") -> str:
+                  """Execute code in sandbox."""
+                  if not enable_execution:
+                      return "Code execution disabled."
+                  executors = {"python": ["python3", "-c"], "javascript": ["node", "-e"], "bash": ["bash", "-c"]}
+                  executor = executors.get(language.lower())
+                  if not executor:
+                      return f"Unsupported language: {language}"
+                  try:
+                      result = subprocess.run(executor + [code], capture_output=True, text=True, timeout=30, cwd=workspace_dir)
+                      output = ""
+                      if result.stdout:
+                          output += f"STDOUT:\n{result.stdout}\n"
+                      if result.stderr:
+                          output += f"STDERR:\n{result.stderr}\n"
+                      return output + f"Exit code: {result.returncode}"
+                  except subprocess.TimeoutExpired:
+                      return "Execution timed out."
+                  except Exception as e:
+                      return f"Error: {str(e)}"
+              
+              def analyze_code(code: str, language: str = "python") -> str:
+                  """Analyze code for issues."""
+                  issues = []
+                  for i, line in enumerate(code.split("\n"), 1):
+                      if "eval(" in line or "exec(" in line:
+                          issues.append(f"Line {i}: Security risk - eval/exec")
+                      if len(line) > 120:
+                          issues.append(f"Line {i}: Line too long")
+                  return "Issues:\n" + "\n".join(f"- {i}" for i in issues) if issues else "No issues found."
+              
+              def write_file(filename: str, content: str) -> str:
+                  """Write file to workspace."""
+                  if ".." in filename or filename.startswith("/"):
+                      return "Invalid filename."
+                  filepath = Path(workspace_dir) / filename
+                  filepath.parent.mkdir(parents=True, exist_ok=True)
+                  filepath.write_text(content)
+                  return f"Written: {filepath}"
+              
+              def read_file(filename: str) -> str:
+                  """Read file from workspace."""
+                  if ".." in filename or filename.startswith("/"):
+                      return "Invalid filename."
+                  filepath = Path(workspace_dir) / filename
+                  return filepath.read_text() if filepath.exists() else "File not found."
+              
+              def list_files(directory: str = ".") -> str:
+                  """List workspace files."""
+                  dirpath = Path(workspace_dir) / directory
+                  if not dirpath.exists():
+                      return "Directory not found."
+                  return "\n".join(f"{'📁' if p.is_dir() else '📄'} {p.name}" for p in sorted(dirpath.iterdir()))
+              
+              return Agent(name="Coding Agent", model=model, instructions=CODING_INSTRUCTIONS, 
+                          functions=[execute_code, analyze_code, write_file, read_file, list_files])
+          CODING_EOF
           
-          # Configure logging
-          logging.basicConfig(level=logging.INFO)
-          logger = logging.getLogger(__name__)
+          # Create Image agent
+          cat > /app/multi_agent/agents/image.py << 'IMAGE_EOF'
+          from ..core import Agent
+
+          IMAGE_INSTRUCTIONS = """You are an Image Understanding Agent for visual analysis.
+          Analyze images, extract text (OCR), and answer visual questions."""
+
+          def create_image_agent(model):
+              def analyze_image(image_path: str) -> str:
+                  """Analyze image content."""
+                  return f"Image analysis for: {image_path}\n[Requires vision-capable model]"
+              def extract_text(image_path: str) -> str:
+                  """Extract text from image (OCR)."""
+                  return f"OCR for: {image_path}\n[Requires OCR library]"
+              return Agent(name="Image Agent", model=model, instructions=IMAGE_INSTRUCTIONS, functions=[analyze_image, extract_text])
+          IMAGE_EOF
           
-          app = FastAPI(title="Multi-Agent Backend", version="1.0.0")
+          # Create __init__.py
+          cat > /app/multi_agent/__init__.py << 'INIT_EOF'
+          from .core import Swarm, Agent, Response, Result
+          from .agents import create_supervisor_agent, create_rag_agent, create_coding_agent, create_image_agent
+          INIT_EOF
           
-          # Configuration
-          VLLM_ENDPOINT = os.getenv("VLLM_ENDPOINT", "http://vllm-service.vllm-system.svc.cluster.local:8000")
-          
+          # Create server.py
+          cat > /app/multi_agent/server.py << 'SERVER_EOF'
+          import os
+          from typing import Optional, List, Dict, Any
+          from contextlib import asynccontextmanager
+          from fastapi import FastAPI, HTTPException
+          from fastapi.middleware.cors import CORSMiddleware
+          from pydantic import BaseModel, Field
+          import structlog
+
+          from .core import Swarm, Agent, Response
+          from .agents import create_supervisor_agent, create_rag_agent, create_coding_agent, create_image_agent
+
+          logger = structlog.get_logger()
+
+          VLLM_ENDPOINT = os.getenv("VLLM_ENDPOINT", "http://vllm-service.vllm-system.svc.cluster.local:8000/v1")
+          SUPERVISOR_MODEL = os.getenv("SUPERVISOR_MODEL", "gpt-oss-120b")
+          RAG_MODEL = os.getenv("RAG_MODEL", "gpt-oss-20b")
+          CODING_MODEL = os.getenv("CODING_MODEL", "meta-llama/Llama-3.1-8B-Instruct")
+          IMAGE_MODEL = os.getenv("IMAGE_MODEL", "microsoft/Phi-4")
+          MILVUS_HOST = os.getenv("MILVUS_HOST", "milvus")
+          MILVUS_PORT = int(os.getenv("MILVUS_PORT", "19530"))
+          WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "/workspace")
+          ENABLE_CODE_EXECUTION = os.getenv("ENABLE_CODE_EXECUTION", "true").lower() == "true"
+
+          swarm = None
+          agents = {}
+          sessions = {}
+
           class ChatRequest(BaseModel):
               message: str
-              agent_type: str = "supervisor"
               session_id: str = "default"
-          
+              agent_type: Optional[str] = None
+              context_variables: Dict[str, Any] = {}
+
           class ChatResponse(BaseModel):
               response: str
-              agent_type: str
+              agent_name: str
               session_id: str
-          
+              messages: List[Dict[str, Any]] = []
+
+          def initialize_agents():
+              global swarm, agents
+              logger.info("initializing_agents", vllm_endpoint=VLLM_ENDPOINT)
+              swarm = Swarm(base_url=VLLM_ENDPOINT)
+              rag_agent = create_rag_agent(RAG_MODEL, MILVUS_HOST, MILVUS_PORT)
+              coding_agent = create_coding_agent(CODING_MODEL, WORKSPACE_DIR, ENABLE_CODE_EXECUTION)
+              image_agent = create_image_agent(IMAGE_MODEL)
+              supervisor_agent = create_supervisor_agent(SUPERVISOR_MODEL, rag_agent, coding_agent, image_agent)
+              agents = {"supervisor": supervisor_agent, "rag": rag_agent, "coding": coding_agent, "image": image_agent}
+              logger.info("agents_initialized", agents=list(agents.keys()))
+
+          @asynccontextmanager
+          async def lifespan(app):
+              initialize_agents()
+              yield
+
+          app = FastAPI(title="DGX Spark Multi-Agent API", version="0.1.0", lifespan=lifespan)
+          app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
           @app.get("/health")
-          async def health_check():
-              return {"status": "healthy", "vllm_endpoint": VLLM_ENDPOINT}
-          
-          @app.post("/chat", response_model=ChatResponse)
-          async def chat(request: ChatRequest):
-              """Route chat requests to appropriate agent via VLLM endpoint"""
-              try:
-                  async with httpx.AsyncClient() as client:
-                      # Prepare VLLM request
-                      vllm_request = {
-                          "model": "gpt-oss-120b",
-                          "messages": [
-                              {"role": "system", "content": f"You are a {request.agent_type} agent. Respond helpfully and accurately."},
-                              {"role": "user", "content": request.message}
-                          ],
-                          "max_tokens": 1000,
-                          "temperature": 0.7
-                      }
-                      
-                      # Call VLLM
-                      response = await client.post(
-                          f"{VLLM_ENDPOINT}/v1/chat/completions",
-                          json=vllm_request,
-                          timeout=60.0
-                      )
-                      
-                      if response.status_code != 200:
-                          raise HTTPException(status_code=500, detail="VLLM service error")
-                      
-                      result = response.json()
-                      agent_response = result["choices"][0]["message"]["content"]
-                      
-                      return ChatResponse(
-                          response=agent_response,
-                          agent_type=request.agent_type,
-                          session_id=request.session_id
-                      )
-              
-              except Exception as e:
-                  logger.error(f"Chat error: {str(e)}")
-                  raise HTTPException(status_code=500, detail=str(e))
-          
+          async def health():
+              return {"status": "healthy", "vllm_endpoint": VLLM_ENDPOINT, "agents": list(agents.keys()), "version": "0.1.0"}
+
           @app.get("/agents")
           async def list_agents():
-              return {
-                  "available_agents": [
-                      "supervisor",
-                      "rag",
-                      "code_generation",
-                      "image_understanding"
-                  ]
-              }
-          
-          if __name__ == "__main__":
+              return [{"name": a.name, "model": a.model} for a in agents.values()]
+
+          @app.post("/chat", response_model=ChatResponse)
+          async def chat(request: ChatRequest):
+              if swarm is None:
+                  raise HTTPException(503, "Agents not initialized")
+              session = sessions.setdefault(request.session_id, {"messages": [], "context_variables": {}})
+              session["context_variables"].update(request.context_variables)
+              session["messages"].append({"role": "user", "content": request.message})
+              agent_type = request.agent_type or "supervisor"
+              if agent_type not in agents:
+                  raise HTTPException(400, f"Unknown agent: {agent_type}")
+              agent = agents[agent_type]
+              try:
+                  response = swarm.run(agent=agent, messages=session["messages"], context_variables=session["context_variables"])
+                  session["messages"].extend(response.messages)
+                  session["context_variables"].update(response.context_variables)
+                  response_text = next((m["content"] for m in response.messages if m.get("role") == "assistant" and m.get("content")), "")
+                  return ChatResponse(response=response_text, agent_name=response.agent.name if response.agent else agent.name, session_id=request.session_id, messages=response.messages)
+              except Exception as e:
+                  logger.error("chat_error", error=str(e))
+                  raise HTTPException(500, str(e))
+
+          @app.delete("/sessions/{session_id}")
+          async def delete_session(session_id: str):
+              if session_id in sessions:
+                  del sessions[session_id]
+                  return {"status": "deleted"}
+              raise HTTPException(404, "Session not found")
+
+          def main():
               import uvicorn
-              uvicorn.run(app, host="0.0.0.0", port=8000)
-          AGENT_EOF
+              uvicorn.run("multi_agent.server:app", host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8000")))
+
+          if __name__ == "__main__":
+              main()
+          SERVER_EOF
           
-          cd /app && python main.py
+          echo "Starting multi-agent server..."
+          cd /app && python -m multi_agent.server
         workingDir: /app
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
         livenessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 60
+          initialDelaySeconds: 120
           periodSeconds: 30
+          timeoutSeconds: 10
         readinessProbe:
           httpGet:
             path: /health
             port: 8000
-          initialDelaySeconds: 30
+          initialDelaySeconds: 60
           periodSeconds: 10
+          timeoutSeconds: 5
         resources:
           requests:
             memory: "2Gi"
@@ -529,16 +898,22 @@ spec:
           limits:
             memory: "4Gi"
             cpu: "2"
+      volumes:
+      - name: workspace
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: agent-backend
   namespace: agents-system
+  labels:
+    app: agent-backend
 spec:
   type: LoadBalancer
   ports:
-  - port: 8000
+  - name: http
+    port: 8000
     targetPort: 8000
   selector:
     app: agent-backend
