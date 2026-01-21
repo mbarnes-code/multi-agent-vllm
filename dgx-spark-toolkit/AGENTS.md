@@ -6,8 +6,6 @@ This document provides guidance for AI coding agents working on this repository.
 
 **DGX Spark Toolkit** is a collection of scripts, Kubernetes manifests, and Docker configurations for managing a two-node DGX Spark cluster. The cluster consists of:
 
-- **spark-2959**: Control plane node (Kubernetes master)
-- **spark-ba63**: Worker node
 
 Both machines are NVIDIA DGX Spark systems with:
 - ARM64 architecture (aarch64)
@@ -159,10 +157,6 @@ dgx-spark-toolkit/
 | Service CIDR | 10.96.0.0/12 | Kubernetes services |
 
 **Key IPs**:
-- spark-2959 LAN: 192.168.86.38
-- spark-ba63 LAN: 192.168.86.39
-- spark-2959 Fabric: 10.10.10.1
-- spark-ba63 Fabric: 10.10.10.2
 - K8s API: 10.10.10.1:6443
 
 ### Common Issues and Solutions
