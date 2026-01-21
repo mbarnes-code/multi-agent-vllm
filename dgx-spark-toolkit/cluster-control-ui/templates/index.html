@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DGX Spark - Cluster Control</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash-stack">
+      {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+
+    <!-- Main Tabbed Panel -->
+    <section class="tabbed-panel card" style="margin-top: 1rem;">
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab-target="cluster">⚙️ Ops Center</button>
+        <button class="tab-btn" data-tab-target="apps">🛠️ Apps</button>
+        <button class="tab-btn" data-tab-target="llm">🤖 LLM</button>
+        <button class="tab-btn" data-tab-target="imagegen">🎨 Image Gen</button>
+        {% if status_hosts %}<button class="tab-btn" data-tab-target="utilization">📊 Monitoring</button>{% endif %}
+      </div>
+
+      <!-- Apps Tab -->
+      <div class="tab-content" id="tab-apps">
+        <div class="panel-card">
+          <div class="panel-head">
+            <h3>🛠️ Application Management</h3>
+            <div class="flex-row gap-sm">
+              <button class="ops-btn sm secondary" onclick="appsRefreshStatus()">🔄 Refresh</button>
+            </div>
+          </div>
+          <p class="muted mt-sm">Manage ComfyUI, Ollama, and OpenWebUI deployments in the <code>apps</code> namespace.</p>
+          
+          <div id="apps-container" class="apps-grid mt-lg">
+            <div class="empty-state">
+              <p>Loading apps status...</p>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Apps Logs Panel -->
+        <div class="panel-card mt-md" id="apps-logs-panel" style="display:none;">
+          <div class="panel-head">
+            <h3>📋 <span id="apps-logs-title">App Logs</span></h3>
+            <div class="flex-row gap-sm">
+              <button class="ops-btn sm secondary" onclick="appsRefreshLogs()">🔄 Refresh</button>
+              <button class="ops-btn sm secondary" onclick="hideAppsLogs()">✕ Close</button>
+            </div>
+          </div>
+          <pre id="apps-logs-content" class="logs-container" style="max-height:400px;">Select an app to view logs...</pre>
+        </div>
+      </div>
+
+      <!-- LLM Tab -->
+      <div class="tab-content" id="tab-llm">
+        <div class="grid-2col">
+          <!-- Deployment Controls -->
+          <div class="panel-card">
+            <div class="panel-head"><h3>🚀 Model Deployment</h3></div>
+            <div class="mt-md">
+              <!-- Status Bar -->
+              <div class="flex-row p-md" style="background:var(--panel-muted);border-radius:var(--radius-sm);margin-bottom:1rem;">
+                <div>
+                  <span class="muted">Status:</span>
+                  <span id="llm-mode-badge" class="mode-badge not-deployed">Not Deployed</span>
+                </div>
+                <div class="flex-row gap-md" style="margin-left:auto;">
+                  <span class="health-indicator"><span id="llm-vllm-dot" class="health-dot offline"></span> vLLM</span>
+                </div>
+              </div>
+              
+              <!-- Current Model -->
+              <div class="form-group">
+                <label class="form-label">Current Model</label>
+                <div id="llm-current-model" style="font-weight:600;font-size:1rem;">None</div>
+              </div>
+              
+              <!-- Model Selection -->
+              <div class="form-group">
+                <label class="form-label">Deploy Model</label>
+                <select id="llm-model-select" class="w-full">
+                  <option value="phi-4">Phi-4 (14B) - 28GB</option>
+                  <option value="nemotron-nano-30b">Nemotron-3 Nano 30B (60GB)</option>
+                  <option value="mistral-nemo-12b">Mistral-Nemo-Instruct-2407 (24GB)</option>
+                </select>
+              </div>
+              
+              <!-- Deploy Button -->
+              <div class="mb-md">
+                <button class="ops-btn gpu w-full" onclick="llmDeploy('distributed')">🚀 Deploy (Distributed)</button>
+              </div>
+              
+              <!-- Control Buttons -->
+              <div class="flex-row gap-sm flex-wrap">
+                <button class="ops-btn success sm" id="llm-start-btn" onclick="llmStart()" disabled>▶ Start</button>
+                <button class="ops-btn warning sm" id="llm-stop-btn" onclick="llmStop()" disabled>⏹ Stop</button>
+                <button class="ops-btn danger sm" id="llm-delete-btn" onclick="llmDelete()" disabled>🗑️ Delete</button>
+                <button class="ops-btn secondary sm" onclick="llmRestart()">🔄 Restart</button>
+              </div>
+              
+              <!-- Endpoints -->
+              <div class="border-t mt-lg">
+                <h4 style="font-size:0.9rem;margin:0 0 0.75rem;">API Endpoints</h4>
+                <div class="endpoints-info">
+                  <div class="endpoint"><span class="endpoint-label">vLLM:</span> <code>192.168.86.203:8081</code></div>
+                  <div class="endpoint"><a href="http://192.168.86.203:8265" target="_blank" style="color:var(--accent);">📊 Ray Dashboard</a></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Chat Interface -->
+          <div class="panel-card chat-container">
+            <div class="panel-head">
+              <h3>💬 Chat</h3>
+              <div class="flex-row gap-sm">
+                <button class="ops-btn sm secondary" onclick="llmClearChat()">Clear</button>
+              </div>
+            </div>
+            
+            <div id="llm-chat-messages" class="chat-messages">
+              <div class="chat-message system">Deploy a model and start chatting!</div>
+            </div>
+            
+            <div class="flex-row gap-sm">
+              <textarea id="llm-chat-input" placeholder="Type your message..." 
+                style="flex:1;min-height:60px;"
+                onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();llmSendMessage();}"></textarea>
+              <button class="ops-btn primary" id="llm-send-btn" onclick="llmSendMessage()" style="height:100%;">Send ➤</button>
+            </div>
+            
+            <div class="flex-row gap-md mt-sm muted" style="font-size:0.8rem;">
+              <label>Max tokens: <input type="number" id="llm-max-tokens" value="1024" min="64" max="4096" style="width:70px;"></label>
+              <label>Temp: <input type="number" id="llm-temperature" value="0.7" min="0" max="2" step="0.1" style="width:60px;"></label>
+              <label class="flex-row gap-sm"><input type="checkbox" id="llm-stream" checked> Stream</label>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Logs -->
+        <div class="panel-card mt-md">
+          <div class="panel-head">
+            <h3>📋 Logs</h3>
+            <button class="ops-btn sm secondary" onclick="llmRefreshLogs()">🔄 Refresh</button>
+          </div>
+          <pre id="llm-logs" class="logs-container mt-md">No logs available.</pre>
+        </div>
+      </div>
+
+      <!-- Image Generation Tab -->
+      <div class="tab-content" id="tab-imagegen">
+        <div class="grid-2col">
+          <!-- Deployment Controls -->
+          <div class="panel-card">
+            <div class="panel-head"><h3>🚀 Image Gen Deployment</h3></div>
+            <div class="mt-md">
+              <!-- Status -->
+              <div class="flex-row p-md" style="background:var(--panel-muted);border-radius:var(--radius-sm);margin-bottom:1rem;">
+                <div>
+                  <span class="muted">Status:</span>
+                  <span id="imagegen-status-badge" class="mode-badge not-deployed">Not Deployed</span>
+                </div>
+                <span class="health-indicator" style="margin-left:auto;">
+                  <span id="imagegen-health-dot" class="health-dot offline"></span> API
+                </span>
+              </div>
+              
+              <div class="form-group">
+                <label class="form-label">Current Model</label>
+                <div id="imagegen-current-model" style="font-weight:600;">None</div>
+              </div>
+              
+              <div class="form-group">
+                <label class="form-label">Pods</label>
+                <div id="imagegen-pods-status">-</div>
+              </div>
+              
+              <div class="form-group">
+                <label class="form-label">Deploy Model</label>
+                <select id="imagegen-model-select" class="w-full">
+                  <option value="qwen-image-2512">Qwen-Image-2512 (41GB)</option>
+                  <option value="stable-diffusion-xl">Stable Diffusion XL (12GB)</option>
+                  <option value="flux2-dev">FLUX.2 Dev (34GB) 🔒 Gated</option>
+                  <option value="sd35-medium">SD 3.5 Medium (18GB) 🔒 Gated</option>
+                </select>
+              </div>
+              
+              <div class="form-group">
+                <label class="form-label">Replicas</label>
+                <select id="imagegen-replicas" class="w-full">
+                  <option value="1">1 (Single Node)</option>
+                  <option value="2" selected>2 (Both Nodes)</option>
+                </select>
+              </div>
+              
+              <button class="ops-btn gpu w-full mb-md" onclick="imagegenDeploy()">🚀 Deploy</button>
+              
+              <div class="flex-row gap-sm flex-wrap">
+                <button class="ops-btn success sm" onclick="imagegenScale(2)">▲ Scale 2</button>
+                <button class="ops-btn warning sm" onclick="imagegenScale(0)">▼ Scale 0</button>
+                <button class="ops-btn danger sm" onclick="imagegenDelete()">🗑️ Delete</button>
+                <button class="ops-btn secondary sm" onclick="imagegenRefreshStatus()">🔄 Refresh</button>
+              </div>
+              
+              <div class="border-t mt-lg">
+                <h4 style="font-size:0.9rem;margin:0 0 0.75rem;">API Endpoint</h4>
+                <div id="imagegen-endpoint"><code>Not available</code></div>
+                <a id="imagegen-gradio-link" href="#" target="_blank" style="color:var(--accent);font-size:0.85rem;display:none;">🎨 Open Gradio UI</a>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Image Generation Interface -->
+          <div class="panel-card flex-col">
+            <div class="panel-head">
+              <h3>🖼️ Generate Image</h3>
+              <button class="ops-btn sm secondary" onclick="imagegenClear()">Clear</button>
+            </div>
+            
+            <div class="form-group mt-md">
+              <label class="form-label">Prompt</label>
+              <textarea id="imagegen-prompt" placeholder="Describe the image..." style="min-height:80px;"></textarea>
+            </div>
+            
+            <div class="form-group">
+              <label class="form-label">Negative Prompt</label>
+              <input type="text" id="imagegen-negative-prompt" value="blurry, low quality, distorted" class="w-full">
+            </div>
+            
+            <div class="grid-auto" style="grid-template-columns:repeat(4,1fr);">
+              <div>
+                <label class="form-label">Width</label>
+                <select id="imagegen-width" class="w-full">
+                  <option value="512">512</option>
+                  <option value="768">768</option>
+                  <option value="1024" selected>1024</option>
+                  <option value="1280">1280</option>
+                  <option value="1536">1536</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Height</label>
+                <select id="imagegen-height" class="w-full">
+                  <option value="512">512</option>
+                  <option value="768">768</option>
+                  <option value="1024" selected>1024</option>
+                  <option value="1280">1280</option>
+                  <option value="1536">1536</option>
+                </select>
+              </div>
+              <div>
+                <label class="form-label">Steps</label>
+                <input type="number" id="imagegen-steps" value="25" min="5" max="100" class="w-full">
+              </div>
+              <div>
+                <label class="form-label">Guidance</label>
+                <input type="number" id="imagegen-guidance" value="7.5" min="1" max="20" step="0.5" class="w-full">
+              </div>
+            </div>
+            
+            <div class="flex-row gap-md mb-md mt-sm">
+              <div class="flex-1">
+                <label class="form-label">Seed (-1 = random)</label>
+                <input type="number" id="imagegen-seed" value="-1" class="w-full">
+              </div>
+              <div style="display:flex;align-items:end;">
+                <button class="ops-btn primary" id="imagegen-generate-btn" onclick="imagegenGenerate()">🎨 Generate</button>
+              </div>
+            </div>
+            
+            <!-- Result Display -->
+            <div class="image-result-container flex-1">
+              <div id="imagegen-placeholder" class="image-placeholder">
+                <div class="image-placeholder-icon">🖼️</div>
+                <p>Generated image will appear here</p>
+              </div>
+              <img id="imagegen-result" class="image-result">
+              <div id="imagegen-loading" class="image-loading">
+                <div class="spinner">⏳</div>
+                <p id="imagegen-loading-text" class="muted">Generating...</p>
+              </div>
+            </div>
+            
+            <div class="flex-row mt-sm" style="justify-content:flex-end;">
+              <button class="ops-btn secondary sm" id="imagegen-download-btn" onclick="imagegenDownload()" disabled>💾 Download</button>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Logs -->
+        <div class="panel-card mt-md">
+          <div class="panel-head">
+            <h3>📋 Logs</h3>
+            <button class="ops-btn sm secondary" onclick="imagegenRefreshLogs()">🔄 Refresh</button>
+          </div>
+          <pre id="imagegen-logs" class="logs-container mt-md">No logs available.</pre>
+        </div>
+        
+        <!-- History & Stats -->
+        <div class="grid-2col mt-md">
+          <!-- Generation Stats -->
+          <div class="panel-card">
+            <div class="panel-head">
+              <h3>📊 Generation Stats</h3>
+              <button class="ops-btn sm secondary" onclick="imagegenLoadStats()">🔄 Refresh</button>
+            </div>
+            <div id="imagegen-stats" class="mt-md">
+              <div class="stat-mini-grid">
+                <div class="stat-mini">
+                  <span class="stat-mini-value" id="stats-total">-</span>
+                  <span class="stat-mini-label">Total</span>
+                </div>
+                <div class="stat-mini">
+                  <span class="stat-mini-value" id="stats-avg-time">-</span>
+                  <span class="stat-mini-label">Avg Time</span>
+                </div>
+              </div>
+              <div id="stats-by-model" class="mt-md"></div>
+            </div>
+          </div>
+          
+          <!-- Quick History -->
+          <div class="panel-card">
+            <div class="panel-head">
+              <h3>🕐 Recent Generations</h3>
+              <button class="ops-btn sm secondary" onclick="imagegenLoadHistory()">🔄 Refresh</button>
+            </div>
+            <div id="imagegen-history-list" class="mt-md history-list">
+              <p class="muted">No history yet. Generate some images!</p>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Image Gallery -->
+        <div class="panel-card mt-md">
+          <div class="panel-head">
+            <h3>🖼️ Image Gallery</h3>
+            <div class="flex-row gap-sm">
+              <select id="gallery-model-filter" class="sm" onchange="imagegenLoadGallery()">
+                <option value="">All Models</option>
+                <option value="qwen-image-2512">Qwen-Image-2512</option>
+                <option value="stable-diffusion-xl">SDXL</option>
+                <option value="flux2-dev">FLUX.2 Dev</option>
+                <option value="sd35-medium">SD 3.5 Medium</option>
+              </select>
+              <button class="ops-btn sm secondary" onclick="imagegenLoadGallery()">🔄 Refresh</button>
+            </div>
+          </div>
+          <div id="imagegen-gallery" class="image-gallery mt-md">
+            <p class="muted">No images yet. Generate some!</p>
+          </div>
+          <div class="flex-row mt-md" style="justify-content:center;">
+            <button class="ops-btn sm secondary" id="gallery-load-more" onclick="imagegenLoadMoreGallery()" style="display:none;">Load More</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Ops Center Tab -->
+      <div class="tab-content active" id="tab-cluster">
+        <!-- Operations Panel -->
+        <div class="ops-panel">
+          <h4><span class="icon">⚡</span> Cluster Operations</h4>
+          <div class="ops-grid">
+            <div class="ops-section">
+              <h5>Power Management</h5>
+              <div class="ops-buttons">
+                <button class="ops-btn success" onclick="runClusterAction('start')">▶ Start</button>
+                <button class="ops-btn danger" onclick="confirmAction('stop', 'Stop the cluster?')">⏹ Stop</button>
+                <button class="ops-btn purple" onclick="confirmAction('sleep', 'Sleep the cluster?')">🌙 Sleep</button>
+              </div>
+            </div>
+            <div class="ops-section">
+              <h5>Wake-on-LAN</h5>
+              <div class="ops-buttons">
+                <button class="ops-btn warning" onclick="wakeCluster('all')">☀️ Wake All</button>
+                <button class="ops-btn sm secondary" onclick="wakeCluster('control')">spark-2959</button>
+                <button class="ops-btn sm secondary" onclick="wakeCluster('worker')">spark-ba63</button>
+              </div>
+            </div>
+            <div class="ops-section">
+              <h5>Quick Actions</h5>
+              <div class="ops-buttons">
+                <button class="ops-btn primary" onclick="refreshClusterStatus()">🔄 Refresh Status</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cluster Status -->
+        <div class="panel-card mt-md">
+          <div class="status-header">
+            <div>
+              <h3 style="margin:0;">Kubernetes Cluster Status</h3>
+              <span class="muted">Real-time monitoring via SSE</span>
+            </div>
+            <div class="flex-row gap-md">
+              <span id="cluster-sse-status" class="muted" style="font-size:0.8rem;"></span>
+              <label class="flex-row gap-sm" style="font-weight:bold;">
+                <input type="checkbox" id="cluster-tracking-toggle" checked> Auto-refresh
+              </label>
+            </div>
+          </div>
+          
+          <!-- Namespace Visibility Filter -->
+          <div class="namespace-filter mt-md" id="namespace-filter-container">
+            <div class="flex-row gap-sm" style="flex-wrap:wrap;align-items:center;">
+              <span class="muted" style="font-size:0.85rem;margin-right:0.5rem;">Show namespaces:</span>
+              <div id="namespace-toggles" class="flex-row gap-sm" style="flex-wrap:wrap;">
+                <!-- Populated dynamically -->
+              </div>
+              <button class="ops-btn sm secondary" onclick="ClusterUI.toggleAllNamespaces(true)" style="margin-left:auto;">Show All</button>
+              <button class="ops-btn sm secondary" onclick="ClusterUI.toggleAllNamespaces(false)">Hide All</button>
+            </div>
+          </div>
+          
+          <div id="cluster-status-container">
+            <div class="empty-state">
+              <p>Loading cluster status...</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Apps Logs Panel (for Ops Center) -->
+        <div class="panel-card mt-md" id="apps-logs-panel" style="display:none;">
+          <div class="panel-head">
+            <h3>📋 <span id="apps-logs-title">Logs</span></h3>
+            <div class="flex-row gap-sm">
+              <button class="ops-btn sm secondary" onclick="appsRefreshLogs()">🔄 Refresh</button>
+              <button class="ops-btn sm secondary" onclick="hideAppsLogs()">✕ Close</button>
+            </div>
+          </div>
+          <pre id="apps-logs-content" class="logs-container mt-md" style="max-height:400px;">No logs available.</pre>
+        </div>
+
+        <!-- Live Output -->
+        <div class="panel-card mt-md" id="ops-output-panel" style="display:none;">
+          <div class="panel-head">
+            <h3>Operation Output</h3>
+            <button class="ops-btn sm secondary" onclick="hideOpsOutput()">✕ Close</button>
+          </div>
+          <pre id="ops-live-output" class="mt-md" style="max-height:300px;overflow-y:auto;">Awaiting operation...</pre>
+        </div>
+      </div>
+
+      <!-- Monitoring Tab -->
+      {% if status_hosts %}
+      <div class="tab-content" id="tab-utilization">
+        <div class="panel-card">
+          <div class="panel-head">
+            <h3>Node Utilization</h3>
+            <span class="muted">{{ status_hosts|length }} hosts</span>
+          </div>
+          <div class="tracking-controls">
+            <label class="flex-row gap-sm">
+              <input type="checkbox" id="tracking-toggle"> Enable Tracking
+            </label>
+            <span id="sse-status" class="muted" style="font-size:0.8rem;"></span>
+          </div>
+          <div id="host-metrics">
+            <p class="muted">Enable tracking to see real-time metrics...</p>
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+    </section>
+  </div>
+
+  <!-- Modals -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <div id="confirm-modal" class="modal-overlay" onclick="if(event.target===this) hideModal()">
+    <div class="modal-content">
+      <h3>Confirm Action</h3>
+      <p id="confirm-message" class="muted">Are you sure?</p>
+      <div class="modal-footer">
+        <button class="ops-btn secondary" onclick="hideModal()">Cancel</button>
+        <button class="ops-btn danger" id="confirm-btn">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="pod-logs-modal" class="modal-overlay" onclick="if(event.target===this) hidePodLogsModal()">
+    <div class="modal-content modal-wide">
+      <div class="modal-header">
+        <h3>📋 <span id="pod-logs-title">Pod Logs</span></h3>
+        <button class="modal-close" onclick="hidePodLogsModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <pre id="pod-logs-content" class="logs-container" style="max-height:500px;">Loading...</pre>
+      </div>
+      <div class="modal-footer">
+        <button class="ops-btn secondary" onclick="hidePodLogsModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="pod-terminal-modal" class="modal-overlay" onclick="if(event.target===this) hidePodTerminalModal()">
+    <div class="modal-content modal-wide">
+      <div class="modal-header">
+        <h3>💻 <span id="pod-terminal-title">Pod Terminal</span></h3>
+        <button class="modal-close" onclick="hidePodTerminalModal()">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="terminal-container">
+          <div id="terminal-output" class="terminal-output">Welcome to pod terminal. Type commands below.</div>
+          <div class="terminal-input-row">
+            <span class="terminal-prompt">$</span>
+            <input type="text" id="terminal-input" class="terminal-input" 
+                   placeholder="Enter command..." autocomplete="off"
+                   onkeydown="if(event.key==='Enter'){execTerminalCommand();event.preventDefault();}">
+            <button class="ops-btn primary sm" onclick="execTerminalCommand()">Run</button>
+          </div>
+          <div class="terminal-shortcuts">
+            <button class="ops-btn sm secondary" onclick="runQuickCmd('ps aux')">ps aux</button>
+            <button class="ops-btn sm secondary" onclick="runQuickCmd('df -h')">df -h</button>
+            <button class="ops-btn sm secondary" onclick="runQuickCmd('nvidia-smi')">nvidia-smi</button>
+            <button class="ops-btn sm secondary" onclick="runQuickCmd('top -b -n 1 | head -20')">top</button>
+            <button class="ops-btn sm secondary" onclick="runQuickCmd('cat /proc/meminfo | head -10')">meminfo</button>
+            <button class="ops-btn sm secondary" onclick="runQuickCmd('env | sort')">env</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="ops-btn secondary" onclick="clearTerminal()">Clear</button>
+        <button class="ops-btn secondary" onclick="hidePodTerminalModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
