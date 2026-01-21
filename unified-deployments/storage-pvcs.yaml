@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache-pvc
+  namespace: vllm-system
+  labels:
+    component: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: longhorn
+  selector:
+    matchLabels:
+      storage-type: shared-fast
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+  namespace: vllm-system
+  labels:
+    component: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Ti
+  storageClassName: longhorn
+  selector:
+    matchLabels:
+      storage-type: shared-fast
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-data-pvc
+  namespace: agents-system
+  labels:
+    component: agent-storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: longhorn
+  selector:
+    matchLabels:
+      storage-type: shared-fast
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: multimodal-cache-pvc
+  namespace: multimodal-system
+  labels:
+    component: multimodal-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: longhorn
+  selector:
+    matchLabels:
+      storage-type: shared-fast

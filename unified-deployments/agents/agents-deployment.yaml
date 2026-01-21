@@ -1,0 +1,544 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents-system
+  labels:
+    name: agents-system
+    component: multi-agent-chatbot
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: agents-system
+type: Opaque
+stringData:
+  username: chatbot_user
+  password: chatbot_password
+  database: chatbot
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-secret
+  namespace: agents-system
+type: Opaque
+stringData:
+  access-key: minioadmin
+  secret-key: minioadmin
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-config
+  namespace: agents-system
+data:
+  models: "gpt-oss-120b,gpt-oss-20b"
+  vllm_endpoint: "http://vllm-service.vllm-system.svc.cluster.local:8000"
+  log_level: "INFO"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: agents-system
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: database
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - chatbot_user
+            - -d
+            - chatbot
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - chatbot_user
+            - -d
+            - chatbot
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: agent-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: agents-system
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd
+  namespace: agents-system
+  labels:
+    app: etcd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      containers:
+      - name: etcd
+        image: quay.io/coreos/etcd:v3.5.5
+        ports:
+        - containerPort: 2379
+        env:
+        - name: ETCD_AUTO_COMPACTION_MODE
+          value: "revision"
+        - name: ETCD_AUTO_COMPACTION_RETENTION
+          value: "1000"
+        - name: ETCD_QUOTA_BACKEND_BYTES
+          value: "4294967296"
+        - name: ETCD_SNAPSHOT_COUNT
+          value: "50000"
+        command:
+        - etcd
+        args:
+        - --advertise-client-urls=http://127.0.0.1:2379
+        - --listen-client-urls=http://0.0.0.0:2379
+        - --data-dir=/etcd
+        volumeMounts:
+        - name: etcd-data
+          mountPath: /etcd
+        livenessProbe:
+          exec:
+            command:
+            - etcdctl
+            - endpoint
+            - health
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 20
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+      volumes:
+      - name: etcd-data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: agents-system
+spec:
+  ports:
+  - port: 2379
+    targetPort: 2379
+  selector:
+    app: etcd
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: agents-system
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+        ports:
+        - containerPort: 9000
+        env:
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: access-key
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: secret-key
+        command:
+        - minio
+        - server
+        - /minio_data
+        volumeMounts:
+        - name: minio-data
+          mountPath: /minio_data
+        livenessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 20
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+      volumes:
+      - name: minio-data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: agents-system
+spec:
+  ports:
+  - port: 9000
+    targetPort: 9000
+  selector:
+    app: minio
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: milvus
+  namespace: agents-system
+  labels:
+    app: milvus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: milvus
+  template:
+    metadata:
+      labels:
+        app: milvus
+    spec:
+      containers:
+      - name: milvus
+        image: milvusdb/milvus:v2.5.15-20250718-3a3b374f-gpu-arm64
+        ports:
+        - containerPort: 19530
+        - containerPort: 9091
+        env:
+        - name: ETCD_ENDPOINTS
+          value: "etcd:2379"
+        - name: MINIO_ADDRESS
+          value: "minio:9000"
+        command:
+        - milvus
+        - run
+        - standalone
+        volumeMounts:
+        - name: milvus-data
+          mountPath: /var/lib/milvus
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9091
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          timeoutSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 9091
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 10
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "1"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      volumes:
+      - name: milvus-data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: milvus
+  namespace: agents-system
+spec:
+  ports:
+  - name: milvus-api
+    port: 19530
+    targetPort: 19530
+  - name: milvus-web
+    port: 9091
+    targetPort: 9091
+  selector:
+    app: milvus
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-backend
+  namespace: agents-system
+  labels:
+    app: agent-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-backend
+  template:
+    metadata:
+      labels:
+        app: agent-backend
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:15-alpine
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h postgres -p 5432 -U chatbot_user; do
+            echo "Waiting for postgres..."
+            sleep 2
+          done
+      containers:
+      - name: backend
+        image: python:3.11-slim
+        ports:
+        - containerPort: 8000
+        env:
+        - name: POSTGRES_HOST
+          value: "postgres"
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: database
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: ETCD_ENDPOINTS
+          value: "etcd:2379"
+        - name: MINIO_ADDRESS
+          value: "minio:9000"
+        - name: MILVUS_ADDRESS
+          value: "milvus:19530"
+        - name: MODELS
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: models
+        - name: VLLM_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              name: agent-config
+              key: vllm_endpoint
+        command:
+        - sh
+        - -c
+        - |
+          pip install fastapi uvicorn[standard] sqlalchemy asyncpg psycopg2-binary
+          pip install openai httpx pydantic python-multipart
+          pip install pymilvus etcd3 minio
+          
+          cat > /app/main.py << 'AGENT_EOF'
+          from fastapi import FastAPI, HTTPException
+          from pydantic import BaseModel
+          import httpx
+          import os
+          import asyncio
+          import logging
+          
+          # Configure logging
+          logging.basicConfig(level=logging.INFO)
+          logger = logging.getLogger(__name__)
+          
+          app = FastAPI(title="Multi-Agent Backend", version="1.0.0")
+          
+          # Configuration
+          VLLM_ENDPOINT = os.getenv("VLLM_ENDPOINT", "http://vllm-service.vllm-system.svc.cluster.local:8000")
+          
+          class ChatRequest(BaseModel):
+              message: str
+              agent_type: str = "supervisor"
+              session_id: str = "default"
+          
+          class ChatResponse(BaseModel):
+              response: str
+              agent_type: str
+              session_id: str
+          
+          @app.get("/health")
+          async def health_check():
+              return {"status": "healthy", "vllm_endpoint": VLLM_ENDPOINT}
+          
+          @app.post("/chat", response_model=ChatResponse)
+          async def chat(request: ChatRequest):
+              """Route chat requests to appropriate agent via VLLM endpoint"""
+              try:
+                  async with httpx.AsyncClient() as client:
+                      # Prepare VLLM request
+                      vllm_request = {
+                          "model": "gpt-oss-120b",
+                          "messages": [
+                              {"role": "system", "content": f"You are a {request.agent_type} agent. Respond helpfully and accurately."},
+                              {"role": "user", "content": request.message}
+                          ],
+                          "max_tokens": 1000,
+                          "temperature": 0.7
+                      }
+                      
+                      # Call VLLM
+                      response = await client.post(
+                          f"{VLLM_ENDPOINT}/v1/chat/completions",
+                          json=vllm_request,
+                          timeout=60.0
+                      )
+                      
+                      if response.status_code != 200:
+                          raise HTTPException(status_code=500, detail="VLLM service error")
+                      
+                      result = response.json()
+                      agent_response = result["choices"][0]["message"]["content"]
+                      
+                      return ChatResponse(
+                          response=agent_response,
+                          agent_type=request.agent_type,
+                          session_id=request.session_id
+                      )
+              
+              except Exception as e:
+                  logger.error(f"Chat error: {str(e)}")
+                  raise HTTPException(status_code=500, detail=str(e))
+          
+          @app.get("/agents")
+          async def list_agents():
+              return {
+                  "available_agents": [
+                      "supervisor",
+                      "rag",
+                      "code_generation",
+                      "image_understanding"
+                  ]
+              }
+          
+          if __name__ == "__main__":
+              import uvicorn
+              uvicorn.run(app, host="0.0.0.0", port=8000)
+          AGENT_EOF
+          
+          cd /app && python main.py
+        workingDir: /app
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-backend
+  namespace: agents-system
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 8000
+    targetPort: 8000
+  selector:
+    app: agent-backend

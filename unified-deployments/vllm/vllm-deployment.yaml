@@ -1,0 +1,301 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vllm-system
+  labels:
+    name: vllm-system
+    component: model-serving
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-config
+  namespace: vllm-system
+data:
+  model: "openai/gpt-oss-120b"
+  tensor_parallel: "2"
+  gpu_memory_util: "0.90"
+  max_model_len: "8192"
+  ray_version: "2.52.1"
+  vllm_port: "8000"
+  ray_dashboard_port: "8265"
+  enable_expert_parallel: "true"
+  swap_space: "16"
+  trust_remote_code: "false"
+  load_format: "safetensors"
+  nccl_debug: "WARN"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-ray-head
+  namespace: vllm-system
+  labels:
+    app: vllm-ray
+    component: head
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-ray
+      component: head
+  template:
+    metadata:
+      labels:
+        app: vllm-ray
+        component: head
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: vllm-ray-head
+        image: nvcr.io/nvidia/vllm:25.11-py3
+        ports:
+        - containerPort: 8000
+          name: vllm-api
+        - containerPort: 8265
+          name: ray-dashboard
+        - containerPort: 6380
+          name: ray-gcs
+        env:
+        - name: MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: model
+        - name: TENSOR_PARALLEL_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: tensor_parallel
+        - name: GPU_MEMORY_UTILIZATION
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: gpu_memory_util
+        - name: MAX_MODEL_LEN
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: max_model_len
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: true
+        - name: RAY_SERVE_ENABLE_EXPERIMENTAL_STREAMING
+          value: "1"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1,2,3,4,5,6,7"
+        - name: NCCL_DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: nccl_debug
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          
+          echo "Starting Ray head node..."
+          ray start --head --port=6380 --ray-debugger-external --dashboard-host=0.0.0.0 --dashboard-port=8265 --disable-usage-stats
+          
+          echo "Waiting for Ray cluster to be ready..."
+          sleep 10
+          
+          echo "Starting vLLM server with Ray backend..."
+          python -m vllm.entrypoints.openai.api_server \
+            --model $MODEL \
+            --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
+            --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+            --max-model-len $MAX_MODEL_LEN \
+            --host 0.0.0.0 \
+            --port 8000 \
+            --worker-use-ray \
+            --disable-log-requests \
+            --served-model-name gpt-oss-120b
+        resources:
+          requests:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "4"
+          limits:
+            memory: "64Gi"
+            nvidia.com/gpu: "4"
+        volumeMounts:
+        - name: hf-cache
+          mountPath: /root/.cache/huggingface
+        - name: model-cache
+          mountPath: /app/model-cache
+        - name: dev-shm
+          mountPath: /dev/shm
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 300
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: hf-cache-pvc
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache-pvc
+      - name: dev-shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vllm-ray-worker
+  namespace: vllm-system
+  labels:
+    app: vllm-ray
+    component: worker
+spec:
+  selector:
+    matchLabels:
+      app: vllm-ray
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: vllm-ray
+        component: worker
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: vllm-ray-worker
+        image: nvcr.io/nvidia/vllm:25.11-py3
+        env:
+        - name: RAY_ADDRESS
+          value: "vllm-ray-head.vllm-system.svc.cluster.local:6380"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1,2,3,4,5,6,7"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+              optional: true
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          
+          echo "Connecting to Ray head at $RAY_ADDRESS"
+          while ! ray start --address=$RAY_ADDRESS; do
+            echo "Retrying Ray worker connection..."
+            sleep 5
+          done
+          
+          echo "Ray worker started successfully"
+          tail -f /dev/null
+        resources:
+          requests:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "4"
+          limits:
+            memory: "64Gi"
+            nvidia.com/gpu: "4"
+        volumeMounts:
+        - name: hf-cache
+          mountPath: /root/.cache/huggingface
+        - name: model-cache
+          mountPath: /app/model-cache
+        - name: dev-shm
+          mountPath: /dev/shm
+      volumes:
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: hf-cache-pvc
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache-pvc
+      - name: dev-shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+  namespace: vllm-system
+  labels:
+    app: vllm-ray
+spec:
+  type: LoadBalancer
+  ports:
+  - name: vllm-api
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  - name: ray-dashboard
+    port: 8265
+    targetPort: 8265
+    protocol: TCP
+  selector:
+    app: vllm-ray
+    component: head
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-ray-head
+  namespace: vllm-system
+  labels:
+    app: vllm-ray
+    component: head
+spec:
+  type: ClusterIP
+  ports:
+  - name: ray-gcs
+    port: 6380
+    targetPort: 6380
+    protocol: TCP
+  - name: ray-dashboard
+    port: 8265
+    targetPort: 8265
+    protocol: TCP
+  selector:
+    app: vllm-ray
+    component: head
