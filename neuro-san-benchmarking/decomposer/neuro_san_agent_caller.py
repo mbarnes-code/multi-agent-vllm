@@ -1,0 +1,91 @@
+# Copyright © 2025 Cognizant Technology Solutions Corp, www.cognizant.com.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# END COPYRIGHT
+
+from typing import Any
+
+import logging
+from os import getpid
+from threading import get_ident
+
+from neuro_san.client.streaming_input_processor import StreamingInputProcessor
+from neuro_san.interfaces.agent_session import AgentSession
+from neuro_san.internals.graph.activations.argument_assigner import ArgumentAssigner
+
+
+class NeuroSanAgentCaller:
+    """
+    Generic interface for calling an agent
+    """
+
+    def __init__(self, agent_session: AgentSession,
+                 name: str = None):
+        """
+        Constructor
+
+        :param agent_session: The agent session
+        :param name: The name of the agent
+        """
+        self.agent_session: AgentSession = agent_session
+        self.name: str = name
+        self.chat_state: dict[str, Any] = {}
+
+    def get_name(self) -> str:
+        """
+        Get the name of the agent
+
+        :return: The name of the agent
+        """
+        if self.name is not None:
+            return self.name
+        return f"{self.agent_session}"
+
+    def call_agent(self, tool_args: dict[str, Any], timeout_ms: float = 100000.0) -> str:
+        """
+        Call a single agent with given text, return its text response.
+
+        :param tool_args: A dictionary of arguments to pass to the agent
+        :return: The text of the response
+        """
+        assigner = ArgumentAssigner(properties=None)
+        arg_text: list[str] = assigner.assign(tool_args)
+        text: str = "\n".join(arg_text)
+
+        # Set up the chat state for the request
+        self.chat_state: dict[str, Any] = {
+            "last_chat_response": None,
+            "prompt": "",
+            "timeout": timeout_ms,
+            "num_input": 0,
+            "user_input": text,
+            "sly_data": None,
+            "chat_filter": {"chat_filter_type": "MAXIMAL"},
+        }
+
+        use_name: str = self.get_name()
+        logging.debug(f"call_agent({use_name}): sending {len(text)} chars")
+
+        # Call the agent
+        inp = StreamingInputProcessor("DEFAULT", self._tmpfile("program_mode_thinking"), self.agent_session, None)
+        self.chat_state = inp.process_once(self.chat_state)
+
+        return self.chat_state.get("last_chat_response")
+
+    def get_sly_data(self) -> dict[str, Any]:
+        return self.chat_state.get("sly_data")
+
+    # Unique temp file per *call*
+    def _tmpfile(self, stem: str) -> str:
+        return f"/tmp/{stem}_{getpid()}_{get_ident()}.txt"
