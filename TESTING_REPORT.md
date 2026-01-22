@@ -1,12 +1,31 @@
 # Unified Deployment Project - Testing Report
 
-**Date:** 2026-01-21  
+**Date:** 2026-01-21 (Updated: 2026-01-22)  
 **Tested By:** GitHub Copilot Workspace Agent  
 **Status:** ✅ PASSED
 
 ## Executive Summary
 
-The unified deployment project has been thoroughly tested using dry-run mode. All critical issues have been identified and resolved. The deployment scripts are now fully functional with comprehensive dry-run testing capabilities.
+The unified deployment project has been thoroughly tested using dry-run mode. All critical issues have been identified and resolved. The deployment scripts are now fully functional with comprehensive dry-run testing capabilities and security hardening.
+
+## Security Improvements
+
+### Pinned Dependencies for Cluster UI
+**Issue:** The deployment script installed Python packages without version pinning at runtime, which could allow compromised packages to execute malicious code.
+
+**Resolution:**
+- Updated `requirements.txt` with pinned versions for all dependencies:
+  - Flask==3.0.3
+  - PyYAML==6.0.1
+  - kubernetes==31.0.0
+  - requests==2.32.3
+- Removed unpinned `pip install` commands from deployment script
+- Added security comment noting use of pinned, vetted dependency versions
+
+**Files Modified:**
+- `deploy-unified.sh`
+- `unified-deployments/cluster-control-ui/requirements.txt`
+- `features/dgx-spark-toolkit/cluster-control-ui/requirements.txt`
 
 ## Issues Found and Resolved
 

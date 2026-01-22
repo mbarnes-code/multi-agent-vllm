@@ -509,11 +509,22 @@ setup_cluster_ui() {
     # Start the enhanced UI
     cd "${ui_dir}"
     
-    # Install additional dependencies for VLLM and agent monitoring
+    # Install dependencies from pinned requirements file only
+    # Security: Use only pinned, vetted dependency versions
     if [ -f requirements.txt ]; then
+        log_info "Installing dependencies from pinned requirements.txt..."
+        pip install --no-deps -r requirements.txt || {
+            log_error "Failed to install dependencies from requirements.txt"
+            cd "${SCRIPT_DIR}"
+            return 1
+        }
+        # Install dependencies of the pinned packages
         pip install -r requirements.txt
+    else
+        log_error "requirements.txt not found in ${ui_dir}"
+        cd "${SCRIPT_DIR}"
+        return 1
     fi
-    pip install kubernetes requests pyyaml flask
     
     # Start the enhanced UI in background
     nohup python enhanced_app.py > ui-enhanced.log 2>&1 &
