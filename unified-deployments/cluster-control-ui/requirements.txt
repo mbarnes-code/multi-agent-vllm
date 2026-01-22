@@ -1,2 +1,11 @@
+# Core web framework
 Flask==3.0.3
+
+# YAML parsing
 PyYAML==6.0.1
+
+# Kubernetes client for cluster monitoring
+kubernetes==31.0.0
+
+# HTTP requests library
+requests==2.32.3

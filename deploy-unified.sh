@@ -14,6 +14,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Dry-run mode flag
+DRY_RUN=false
+
 # Load unified configuration
 if [ -f "${SCRIPT_DIR}/unified-config.local.env" ]; then
   source "${SCRIPT_DIR}/unified-config.local.env"
@@ -74,6 +77,14 @@ trap cleanup_on_error ERR
 # Utility functions
 check_prerequisites() {
     log_step "Checking prerequisites..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Skipping actual prerequisites check"
+        log_info "[DRY RUN] Would check: NVIDIA GPUs, kubectl, helm, docker, ssh"
+        log_info "[DRY RUN] Would check: InfiniBand interfaces"
+        log_success "[DRY RUN] Prerequisites check simulated"
+        return 0
+    fi
     
     # Check if running on DGX system
     if ! lspci | grep -i nvidia >/dev/null 2>&1; then
@@ -144,6 +155,16 @@ setup_kubernetes_cluster() {
     
     log_info "Initializing Kubernetes cluster with InfiniBand networking..."
     
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would create network configuration:"
+        log_info "[DRY RUN]   Control Plane: ${CONTROL_PLANE_API_IP}"
+        log_info "[DRY RUN]   Worker Node: ${WORKER_NODE_SSH_TARGET}"
+        log_info "[DRY RUN] Would run: ${SCRIPT_DIR}/unified-deployments/scripts/start-k8s-cluster.sh"
+        log_info "[DRY RUN] Would wait for cluster to be ready"
+        log_success "[DRY RUN] Kubernetes cluster setup simulated"
+        return 0
+    fi
+    
     # Copy network configuration to dgx-spark-toolkit format
     cat > /tmp/network-override.env << EOF
 CONTROL_PLANE_API_IP=${CONTROL_PLANE_API_IP}
@@ -168,8 +189,8 @@ EOF
     # Export for dgx-spark-toolkit script
     export DGX_SPARK_NETWORK_CONFIG="/tmp/network-override.env"
     
-    # Run Kubernetes cluster setup
-    "${SCRIPT_DIR}/dgx-spark-toolkit/scripts/start-k8s-cluster.sh"
+    # Run Kubernetes cluster setup (use unified-deployments version)
+    "${SCRIPT_DIR}/unified-deployments/scripts/start-k8s-cluster.sh"
     
     # Wait for cluster to be ready
     log_info "Waiting for cluster to be ready..."
@@ -187,6 +208,17 @@ create_namespaces() {
         "multimodal-system:Multi-modal inference"
         "monitoring-system:Monitoring stack"
     )
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would create namespaces:"
+        for ns_info in "${namespaces[@]}"; do
+            local ns_name="${ns_info%%:*}"
+            local ns_desc="${ns_info##*:}"
+            log_info "[DRY RUN]   - ${ns_name} (${ns_desc})"
+        done
+        log_success "[DRY RUN] Namespace creation simulated"
+        return 0
+    fi
     
     for ns_info in "${namespaces[@]}"; do
         local ns_name="${ns_info%%:*}"
@@ -216,6 +248,15 @@ EOF
 
 setup_persistent_storage() {
     show_progress "Setting up persistent storage..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would create storage class and persistent volumes:"
+        log_info "[DRY RUN]   - hf-cache: ${HF_CACHE} (${HF_CACHE_SIZE})"
+        log_info "[DRY RUN]   - model-cache: ${MODEL_CACHE} (${MODEL_CACHE_SIZE})"
+        log_info "[DRY RUN]   - agent-data: ${AGENT_DATA} (${AGENT_DATA_SIZE})"
+        log_success "[DRY RUN] Persistent storage configuration simulated"
+        return 0
+    fi
     
     # Create storage classes if not using Longhorn
     if [ "${ENABLE_LONGHORN}" != "1" ]; then
@@ -291,6 +332,18 @@ deploy_vllm_serving() {
         return
     fi
     
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would deploy VLLM with:"
+        log_info "[DRY RUN]   Model: ${MODEL}"
+        log_info "[DRY RUN]   Tensor Parallel: ${TENSOR_PARALLEL}"
+        log_info "[DRY RUN]   GPU Memory Util: ${GPU_MEMORY_UTIL}"
+        log_info "[DRY RUN] Would apply manifests:"
+        log_info "[DRY RUN]   - ${SCRIPT_DIR}/unified-deployments/storage-pvcs.yaml"
+        log_info "[DRY RUN]   - ${SCRIPT_DIR}/unified-deployments/vllm/vllm-deployment.yaml"
+        log_success "[DRY RUN] VLLM deployment simulated"
+        return 0
+    fi
+    
     log_info "Creating VLLM configuration..."
     
     # Create ConfigMap for VLLM configuration
@@ -313,19 +366,6 @@ deploy_vllm_serving() {
     kubectl apply -f "${SCRIPT_DIR}/unified-deployments/storage-pvcs.yaml"
     kubectl apply -f "${SCRIPT_DIR}/unified-deployments/vllm/vllm-deployment.yaml"
     
-    # Additional inline configuration for environment-specific settings
-    kubectl apply -f - << 'EOF'
-apiVersion: v1
-kind: Secret
-metadata:
-  name: hf-token
-  namespace: vllm-system
-type: Opaque
-stringData:
-  token: "${HF_TOKEN}"
-EOF
-    fi
-    
     # Wait for VLLM deployment
     log_info "Waiting for VLLM deployment to be ready..."
     kubectl wait --for=condition=available deployment/vllm-ray-head -n vllm-system --timeout=600s
@@ -339,6 +379,13 @@ deploy_multiagent_chatbot() {
     if [ "${ENABLE_MULTI_AGENT}" != "1" ]; then
         log_info "Multi-agent deployment disabled, skipping..."
         return
+    fi
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would deploy multi-agent chatbot:"
+        log_info "[DRY RUN]   - ${SCRIPT_DIR}/unified-deployments/agents/agents-deployment.yaml"
+        log_success "[DRY RUN] Multi-agent deployment simulated"
+        return 0
     fi
     
     log_info "Creating multi-agent chatbot stack..."
@@ -361,11 +408,26 @@ deploy_multimodal_inference() {
         return
     fi
     
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would deploy multi-modal inference"
+        if [ "${ENABLE_COMFYUI}" = "1" ]; then
+            log_info "[DRY RUN]   - ComfyUI for image generation"
+        fi
+        log_success "[DRY RUN] Multi-modal deployment simulated"
+        return 0
+    fi
+    
     if [ "${ENABLE_COMFYUI}" = "1" ]; then
         log_info "Deploying ComfyUI for image generation..."
         
-        # Deploy ComfyUI from existing dgx-spark-toolkit configuration
-        kubectl apply -f "${SCRIPT_DIR}/dgx-spark-toolkit/deployments/image-gen/" -n multimodal-system
+        # Deploy ComfyUI from existing dgx-spark-toolkit configuration (use unified-deployments version if available)
+        if [ -d "${SCRIPT_DIR}/unified-deployments/config/image-gen" ]; then
+            kubectl apply -f "${SCRIPT_DIR}/unified-deployments/config/image-gen/" -n multimodal-system
+        elif [ -d "${SCRIPT_DIR}/features/dgx-spark-toolkit/deployments/image-gen" ]; then
+            kubectl apply -f "${SCRIPT_DIR}/features/dgx-spark-toolkit/deployments/image-gen/" -n multimodal-system
+        else
+            log_warn "ComfyUI deployment manifests not found, skipping..."
+        fi
     fi
     
     log_success "Multi-modal inference deployed"
@@ -373,6 +435,15 @@ deploy_multimodal_inference() {
 
 setup_monitoring() {
     show_progress "Setting up monitoring and observability..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would deploy monitoring stack"
+        if [ "${ENABLE_PROMETHEUS}" = "1" ] || [ "${ENABLE_GRAFANA}" = "1" ]; then
+            log_info "[DRY RUN]   - Prometheus/Grafana monitoring"
+        fi
+        log_success "[DRY RUN] Monitoring deployment simulated"
+        return 0
+    fi
     
     if [ "${ENABLE_PROMETHEUS}" = "1" ] || [ "${ENABLE_GRAFANA}" = "1" ]; then
         log_info "Deploying monitoring stack..."
@@ -406,18 +477,54 @@ EOF
 setup_cluster_ui() {
     show_progress "Setting up cluster management UI..."
     
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would setup enhanced cluster control UI"
+        log_info "[DRY RUN]   - Copy enhanced_app.py"
+        log_info "[DRY RUN]   - Install dependencies"
+        log_info "[DRY RUN]   - Start UI server"
+        log_success "[DRY RUN] Cluster UI setup simulated"
+        return 0
+    fi
+    
     log_info "Starting enhanced cluster control UI..."
     
-    # Copy enhanced UI to cluster-control-ui directory
-    cp "${SCRIPT_DIR}/unified-deployments/cluster-ui-enhanced.py" \
-       "${SCRIPT_DIR}/dgx-spark-toolkit/cluster-control-ui/enhanced_app.py"
+    # Check if cluster-control-ui directory exists (from features/dgx-spark-toolkit)
+    local ui_dir="${SCRIPT_DIR}/unified-deployments/cluster-control-ui"
+    if [ ! -d "$ui_dir" ]; then
+        if [ -d "${SCRIPT_DIR}/features/dgx-spark-toolkit/cluster-control-ui" ]; then
+            log_info "Using cluster-control-ui from features directory"
+            ui_dir="${SCRIPT_DIR}/features/dgx-spark-toolkit/cluster-control-ui"
+        else
+            log_warn "cluster-control-ui directory not found, skipping UI setup"
+            return 0
+        fi
+    fi
+    
+    # Copy enhanced UI if it exists
+    if [ -f "${SCRIPT_DIR}/unified-deployments/cluster-ui-enhanced.py" ]; then
+        cp "${SCRIPT_DIR}/unified-deployments/cluster-ui-enhanced.py" \
+           "${ui_dir}/enhanced_app.py"
+    fi
     
     # Start the enhanced UI
-    cd "${SCRIPT_DIR}/dgx-spark-toolkit/cluster-control-ui"
+    cd "${ui_dir}"
     
-    # Install additional dependencies for VLLM and agent monitoring
-    pip install -r requirements.txt
-    pip install kubernetes requests pyyaml flask
+    # Install dependencies from pinned requirements file only
+    # Security: Use only pinned, vetted dependency versions
+    if [ -f requirements.txt ]; then
+        log_info "Installing dependencies from pinned requirements.txt..."
+        pip install --no-deps -r requirements.txt || {
+            log_error "Failed to install dependencies from requirements.txt"
+            cd "${SCRIPT_DIR}"
+            return 1
+        }
+        # Install dependencies of the pinned packages
+        pip install -r requirements.txt
+    else
+        log_error "requirements.txt not found in ${ui_dir}"
+        cd "${SCRIPT_DIR}"
+        return 1
+    fi
     
     # Start the enhanced UI in background
     nohup python enhanced_app.py > ui-enhanced.log 2>&1 &
@@ -495,16 +602,26 @@ EOF
 # Main installation flow
 main() {
     display_banner
+    
+    if [ "$DRY_RUN" = true ]; then
+        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "  DRY RUN MODE - No actual changes will be made"
+        log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+    fi
+    
     check_prerequisites
     display_configuration
     
     # Confirm before proceeding
-    echo ""
-    read -p "🤔 Do you want to proceed with this configuration? (y/N): " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log_info "Installation cancelled by user."
-        exit 0
+    if [ "$DRY_RUN" = false ]; then
+        echo ""
+        read -p "🤔 Do you want to proceed with this configuration? (y/N): " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Installation cancelled by user."
+            exit 0
+        fi
     fi
     
     # Execute deployment steps
@@ -517,14 +634,28 @@ main() {
     setup_monitoring
     setup_cluster_ui
     
-    display_deployment_summary
-    
-    log_success "🎉 DGX Spark Multi-Agent VLLM deployment completed successfully!"
+    if [ "$DRY_RUN" = true ]; then
+        echo ""
+        log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_success "  DRY RUN COMPLETED SUCCESSFULLY"
+        log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info ""
+        log_info "To perform actual deployment, run:"
+        log_info "  ./deploy-unified.sh deploy"
+        echo ""
+    else
+        display_deployment_summary
+        log_success "🎉 DGX Spark Multi-Agent VLLM deployment completed successfully!"
+    fi
 }
 
 # Handle command line arguments
 case "${1:-deploy}" in
     "deploy" | "install")
+        main
+        ;;
+    "--dry-run" | "dry-run" | "test")
+        DRY_RUN=true
         main
         ;;
     "status")
@@ -543,11 +674,12 @@ case "${1:-deploy}" in
         fi
         ;;
     *)
-        echo "Usage: $0 {deploy|status|logs|cleanup}"
-        echo "  deploy   - Deploy the complete stack (default)"
-        echo "  status   - Show deployment status"
-        echo "  logs     - Show VLLM server logs"
-        echo "  cleanup  - Remove all components"
+        echo "Usage: $0 {deploy|--dry-run|status|logs|cleanup}"
+        echo "  deploy      - Deploy the complete stack (default)"
+        echo "  --dry-run   - Test deployment configuration without making changes"
+        echo "  status      - Show deployment status"
+        echo "  logs        - Show VLLM server logs"
+        echo "  cleanup     - Remove all components"
         exit 1
         ;;
 esac
